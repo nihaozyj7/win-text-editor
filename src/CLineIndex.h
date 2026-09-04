@@ -33,7 +33,7 @@ public:
     void NotifyEdit(uint64_t ofs, int64_t deltaBytes, int64_t deltaLines);
 
     uint64_t GetLineCount() const;
-    bool     IsValid() const;   // 源非空（至少 1 行或空文本 0 行）时的可用性
+    bool     IsValid() const;   // 已设置数据源（含空文档，此时视为 1 个空行）
 
     // 返回第 row 行（0 起）的起始字节偏移与字节长度（含行尾换行符序列）
     uint64_t GetLineStart(uint64_t row) const;

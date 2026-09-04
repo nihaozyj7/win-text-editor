@@ -7,6 +7,8 @@ PieceTable::PieceTable()
     : m_size(0)
     , m_originalBase(nullptr)
     , m_originalSize(0)
+    , m_lastUndoOfs(0)
+    , m_lastRedoOfs(0)
 {
 }
 
@@ -18,6 +20,8 @@ void PieceTable::SetOriginal(const unsigned char* base, uint64_t size)
     m_addBuf.clear();
     m_undoStack.clear();
     m_redoStack.clear();
+    m_lastUndoOfs = 0;
+    m_lastRedoOfs = 0;
 
     if (m_originalSize > 0)
         m_pieces.push_back({ Piece::Src::Original, 0, static_cast<uint32_t>(m_originalSize) });
@@ -116,6 +120,7 @@ bool PieceTable::Undo()
     else
         Insert(cmd.ofs, cmd.data.data(), static_cast<uint32_t>(cmd.data.size()), false);
 
+    m_lastUndoOfs = cmd.ofs;
     m_redoStack.push_back(std::move(cmd));
     return true;
 }
@@ -133,8 +138,19 @@ bool PieceTable::Redo()
     else
         Erase(cmd.ofs, static_cast<uint32_t>(cmd.data.size()), false);
 
+    m_lastRedoOfs = cmd.ofs;
     m_undoStack.push_back(std::move(cmd));
     return true;
+}
+
+uint64_t PieceTable::UndoOffset() const
+{
+    return m_lastUndoOfs;
+}
+
+uint64_t PieceTable::RedoOffset() const
+{
+    return m_lastRedoOfs;
 }
 
 uint64_t PieceTable::Size() const

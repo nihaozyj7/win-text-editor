@@ -16,6 +16,7 @@ set(SRC_LIST
     src/Encoding.cpp
     src/CLineIndex.cpp
     src/CRenderer.cpp
+    src/PieceTable.cpp
 )
 
 add_executable(editor WIN32 ${SRC_LIST})

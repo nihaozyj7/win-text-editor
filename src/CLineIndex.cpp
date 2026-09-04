@@ -53,8 +53,16 @@ void CLineIndex::BuildAll()
 {
     m_lineCount = 0;
     m_keyFrames.clear();
-    if (!m_scan.reader || m_scan.size == 0)
+    if (!m_scan.reader)
         return;
+
+    // 空文档视为 1 个空行（保证新建/清空后可编辑）
+    if (m_scan.size == 0)
+    {
+        m_lineCount = 1;
+        m_keyFrames.push_back({ 0, 0 });
+        return;
+    }
 
     // 扫描 code units，统计行；每 kFrameInterval 行记录一个关键帧
     uint64_t breaks = 0;

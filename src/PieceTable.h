@@ -38,6 +38,10 @@ public:
     bool Undo();
     bool Redo();
 
+    // 最近一次 Undo/Redo 应用命令的字节偏移（供上层复位光标）
+    uint64_t UndoOffset() const;
+    uint64_t RedoOffset() const;
+
     // 逻辑总长度（字节）
     uint64_t Size() const;
 
@@ -64,5 +68,7 @@ private:
 
     std::vector<EditCommand> m_undoStack;
     std::vector<EditCommand> m_redoStack;
+    uint64_t m_lastUndoOfs;
+    uint64_t m_lastRedoOfs;
     static constexpr size_t kMaxUndo = 1000;
 };
