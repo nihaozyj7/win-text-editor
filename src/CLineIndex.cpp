@@ -103,15 +103,20 @@ void CLineIndex::NotifyEdit(uint64_t ofs, int64_t deltaBytes, int64_t deltaLines
         return;
     ++m_editEpoch;
 
+    // 关键：文档字节数本身发生了变化，必须同步
+    m_scan.size = static_cast<uint64_t>(static_cast<int64_t>(m_scan.size) + deltaBytes);
+    // 失效块缓存，避免读到编辑前的陈旧字节
+    m_scan.blockStart = 0;
+    m_scan.blockLen = 0;
+
     if (deltaLines == 0 && deltaBytes != 0)
     {
         // 行结构不变：编辑点之后所有行的起始偏移整体平移 deltaBytes
-        // 关键帧行号保持对齐（无行增删），只需平移字节偏移
+        // 编辑点所在行行首 (=ofs，光标在行首) 不变；严格大于 ofs 的行才平移
         for (auto& kf : m_keyFrames)
         {
-            if (kf.byteOffset >= ofs)
+            if (kf.byteOffset > ofs)
             {
-                // byteOffset 恰好 == ofs 的行首：编辑点在行首之后，该行本身也要平移
                 kf.byteOffset = static_cast<uint64_t>(
                     static_cast<int64_t>(kf.byteOffset) + deltaBytes);
             }

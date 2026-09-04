@@ -219,6 +219,62 @@ static void TestLineIndexUtf16()
     CHECK(idx.ByteOffsetToRow(10) == 2);  // 'c'
 }
 
+// 编辑增量：验证 NotifyEdit 之后文档尺寸同步 + 关键帧平移正确
+static void TestLineIndexIncrementalEdit()
+{
+    const char* text = "aa\nbb\ncc";
+    PieceTable pt;
+    pt.SetOriginal(reinterpret_cast<const unsigned char*>(text), std::strlen(text));
+
+    CLineIndex idx;
+    idx.Build(
+        [&pt](uint64_t ofs, unsigned char* dst, uint64_t maxLen) -> uint64_t {
+            return pt.ReadRange(ofs, dst, maxLen);
+        },
+        pt.Size(), Encoding::Utf8);
+
+    CHECK(idx.GetLineCount() == 3);
+    CHECK(idx.GetLineStart(0) == 0);
+    CHECK(idx.GetLineStart(1) == 3);   // "aa\n"
+    CHECK(idx.GetLineStart(2) == 6);   // "bb\n"
+
+    // 在第 1 行中间（"aa" 的第二个 a 之后，字节偏移 2）插入 "XY"（无换行）
+    const char* ins = "XY";
+    pt.Insert(2, reinterpret_cast<const unsigned char*>(ins), 2);
+    idx.NotifyEdit(2, 2, 0);
+
+    // 尺寸更新
+    CHECK(pt.Size() == std::strlen(text) + 2);
+    // 行数不变
+    CHECK(idx.GetLineCount() == 3);
+    // 第 0 行行首不变；后续行首整体 +2
+    CHECK(idx.GetLineStart(0) == 0);
+    CHECK(idx.GetLineStart(1) == 5);   // 3 + 2
+    CHECK(idx.GetLineStart(2) == 8);   // 6 + 2
+    // 偏移→行仍正确
+    CHECK(idx.ByteOffsetToRow(0) == 0);
+    CHECK(idx.ByteOffsetToRow(3) == 0);   // 落于第 0 行（插入后 "aaXY\n"）
+    CHECK(idx.ByteOffsetToRow(6) == 1);
+    CHECK(idx.ByteOffsetToRow(9) == 2);
+
+    // 行首插入：光标在行首（ofs == 某行行首）时该行行首不应平移
+    PieceTable pt2;
+    pt2.SetOriginal(reinterpret_cast<const unsigned char*>(text), std::strlen(text));
+    CLineIndex idx2;
+    idx2.Build(
+        [&pt2](uint64_t ofs, unsigned char* dst, uint64_t maxLen) -> uint64_t {
+            return pt2.ReadRange(ofs, dst, maxLen);
+        },
+        pt2.Size(), Encoding::Utf8);
+
+    const char* ins2 = "Z";
+    pt2.Insert(3, reinterpret_cast<const unsigned char*>(ins2), 1);  // 在行首(第1行)插入
+    idx2.NotifyEdit(3, 1, 0);
+
+    CHECK(idx2.GetLineStart(1) == 3);   // 第 1 行行首不变（新内容成为该行开头）
+    CHECK(idx2.GetLineStart(2) == 7);   // 6 + 1
+}
+
 int main()
 {
     std::printf("== core_tests ==\n");
@@ -230,6 +286,7 @@ int main()
     TestLineIndex();
     TestLineIndexOnPieceTable();
     TestLineIndexUtf16();
+    TestLineIndexIncrementalEdit();
 
     if (g_failures == 0)
     {

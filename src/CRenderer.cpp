@@ -215,8 +215,8 @@ void CRenderer::ApplyEmojiFontMapping(IDWriteTextLayout* pLayout,
         }
         if (inEmoji)
         {
-            // 一个代码点占 1 或 2 个 UTF-16 单元
-            range.length = (cp > 0xFFFF) ? 2 : 1;
+            // 一个代码点占 1 或 2 个 UTF-16 单元；累加到范围长度
+            range.length += (cp > 0xFFFF) ? 2 : 1;
             if (cp > 0xFFFF)
                 ++i;   // 跳过代理对的低代理单元
         }

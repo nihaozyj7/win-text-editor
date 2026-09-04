@@ -177,7 +177,7 @@ BOOL CEditorWindow::Create(HINSTANCE hInstance, int nCmdShow)
 
     m_hwnd = CreateWindowExW(
         0, kWindowClassName, kWindowTitle,
-        WS_OVERLAPPEDWINDOW | WS_VSCROLL,
+        WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 900, 600,
         nullptr, hMenubar, hInstance, this);
 
@@ -289,6 +289,11 @@ LRESULT CEditorWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         return 0;
 
     case WM_CHAR:
+        OnChar(static_cast<wchar_t>(wParam));
+        return 0;
+
+    case WM_IME_CHAR:
+        // 中文 IME 提交的文字经 WM_IME_CHAR 送达（宽字符 wParam）
         OnChar(static_cast<wchar_t>(wParam));
         return 0;
 
