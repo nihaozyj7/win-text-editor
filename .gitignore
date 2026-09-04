@@ -1,0 +1,5 @@
+build/
+.mimocode/
+*.exe
+*.o
+*.obj
