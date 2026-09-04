@@ -286,7 +286,8 @@ void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, int clientW
 
             if (selLen > 0)
             {
-                // HitTestTextRange 需要调用方预分配 metrics 数组（每字符至多一项）
+                // HitTestTextRange 返回的 metrics 已含 origin 偏移（实测验证），
+                // origin 传 (0, y) 后 top/left 即为最终客户区坐标，不能再加 y
                 UINT32 maxHits = selLen + 1;
                 std::vector<DWRITE_HIT_TEST_METRICS> hits(maxHits);
                 UINT32 hitCount = 0;
@@ -295,19 +296,23 @@ void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, int clientW
                     0.0f, y, hits.data(), maxHits, &hitCount);
                 if (SUCCEEDED(hr) && hitCount > 0)
                 {
+                    if (hitCount > maxHits)
+                        hitCount = maxHits;
                     for (UINT32 h = 0; h < hitCount; ++h)
                     {
                         D2D1_RECT_F r = D2D1::RectF(
-                            hits[h].left, y + hits[h].top,
+                            hits[h].left, hits[h].top,
                             hits[h].left + hits[h].width,
-                            y + hits[h].top + hits[h].height);
+                            hits[h].top + hits[h].height);
                         m_pRT->FillRectangle(r, m_pSelectionBrush);
                     }
                 }
             }
         }
 
-        m_pRT->DrawTextLayout(D2D1::Point2F(0.0f, y), pLayout, m_pTextBrush);
+        m_pRT->DrawTextLayout(
+            D2D1::Point2F(0.0f, y), pLayout, m_pTextBrush,
+            D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
 
         // 光标：仅在可见且位于该行时绘制
         if (caretVisible && row.row == caretRow)
@@ -351,6 +356,10 @@ bool CRenderer::HitTestPoint(const std::vector<Row>& rows, int lineHeight, int c
         return true;
     }
 
+    // 与 Render 保持一致：Emoji 字体映射会影响字符宽度，命中才能对齐
+    this->ApplyEmojiFontMapping(pLayout, row.text.c_str(),
+                                static_cast<UINT32>(row.text.size()));
+
     BOOL isTrailing = FALSE;
     BOOL isInside = FALSE;
     DWRITE_HIT_TEST_METRICS hit{};
@@ -359,7 +368,14 @@ bool CRenderer::HitTestPoint(const std::vector<Row>& rows, int lineHeight, int c
     pLayout->Release();
 
     if (SUCCEEDED(hr))
-        *pCol = static_cast<DWORD>(hit.textPosition);
+    {
+        // 命中簇的右半区（isTrailing）→ 光标落在本簇末尾（+length），
+        // 否则点在字符中间会被吸附到簇首，选区比用户点的位置少一个字符
+        if (isTrailing)
+            *pCol = hit.textPosition + hit.length;
+        else
+            *pCol = hit.textPosition;
+    }
     else
         *pCol = static_cast<DWORD>(row.text.size());
 
