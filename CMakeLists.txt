@@ -37,3 +37,15 @@ target_compile_options(editor PRIVATE
 target_link_options(editor PRIVATE
     $<$<CONFIG:Release>:-s -Wl,--gc-sections>
 )
+
+# 核心单元测试（控制台程序，不依赖窗口/D2D）
+add_executable(core_tests
+    tests/core_tests.cpp
+    src/PieceTable.cpp
+    src/Encoding.cpp
+)
+target_compile_definitions(core_tests PRIVATE UNICODE _UNICODE)
+target_compile_options(core_tests PRIVATE
+    -finput-charset=UTF-8
+    -fexec-charset=UTF-8
+)
