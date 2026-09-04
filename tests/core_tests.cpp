@@ -7,6 +7,7 @@
 
 #include "../src/PieceTable.h"
 #include "../src/Encoding.h"
+#include "../src/CLineIndex.h"
 
 static int g_failures = 0;
 
@@ -144,6 +145,28 @@ static void TestEncodingDetection()
     }
 }
 
+static void TestLineIndex()
+{
+    // 文本："abc\n""def\r\n""ghi\r""jkl"（结尾无换行）
+    const char* text = "abc\ndef\r\nghi\rjkl";
+    CLineIndex idx;
+    idx.Build(reinterpret_cast<const unsigned char*>(text), std::strlen(text));
+
+    CHECK(idx.GetLineCount() == 4);
+
+    // 每行起始"字节"偏移
+    CHECK(idx.GetLineStart(0) == 0);   // "abc\n"
+    CHECK(idx.GetLineStart(1) == 4);   // "def\r\n"
+    CHECK(idx.GetLineStart(2) == 9);   // "ghi\r"
+    CHECK(idx.GetLineStart(3) == 13);  // "jkl"
+
+    // 字节偏移 → 行号
+    CHECK(idx.ByteOffsetToRow(0) == 0);    // 'a'
+    CHECK(idx.ByteOffsetToRow(4) == 1);    // 'd'
+    CHECK(idx.ByteOffsetToRow(9) == 2);    // 'g'
+    CHECK(idx.ByteOffsetToRow(13) == 3);   // 'j'
+}
+
 int main()
 {
     std::printf("== core_tests ==\n");
@@ -152,6 +175,7 @@ int main()
     TestPieceTableUndoRedo();
     TestPieceTableManyUndo();
     TestEncodingDetection();
+    TestLineIndex();
 
     if (g_failures == 0)
     {

@@ -67,3 +67,112 @@ Encoding DetectEncoding(const BYTE* pBuffer, DWORD size)
     // 3. 回退系统代码页（中文系统 = GBK/CP936）
     return Encoding::Ansi;
 }
+
+std::wstring DecodeToWide(const BYTE* pBuffer, DWORD size, Encoding enc)
+{
+    if (!pBuffer || size == 0)
+        return {};
+
+    switch (enc)
+    {
+    case Encoding::Utf8:
+    {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0,
+                                       reinterpret_cast<const char*>(pBuffer), size,
+                                       nullptr, 0);
+        if (wlen <= 0)
+            return {};
+        std::wstring out(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0,
+                            reinterpret_cast<const char*>(pBuffer), size,
+                            out.data(), wlen);
+        return out;
+    }
+    case Encoding::Utf16LE:
+    {
+        // size 以字节计，UTF-16 每 2 字节一个 code unit
+        DWORD units = size / 2;
+        return std::wstring(reinterpret_cast<const wchar_t*>(pBuffer), units);
+    }
+    case Encoding::Utf16BE:
+    {
+        DWORD units = size / 2;
+        std::wstring out(units, L'\0');
+        for (DWORD i = 0; i < units; ++i)
+        {
+            wchar_t ch = static_cast<wchar_t>((pBuffer[i * 2] << 8) | pBuffer[i * 2 + 1]);
+            out[i] = ch;
+        }
+        return out;
+    }
+    case Encoding::Ansi:
+    {
+        UINT cp = GetACP();
+        int wlen = MultiByteToWideChar(cp, 0,
+                                       reinterpret_cast<const char*>(pBuffer), size,
+                                       nullptr, 0);
+        if (wlen <= 0)
+            return {};
+        std::wstring out(wlen, L'\0');
+        MultiByteToWideChar(cp, 0,
+                            reinterpret_cast<const char*>(pBuffer), size,
+                            out.data(), wlen);
+        return out;
+    }
+    }
+    return {};
+}
+
+std::string EncodeFromWide(const std::wstring& text, Encoding enc)
+{
+    if (text.empty())
+        return {};
+
+    switch (enc)
+    {
+    case Encoding::Utf8:
+    {
+        int blen = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                                       nullptr, 0, nullptr, nullptr);
+        if (blen <= 0)
+            return {};
+        std::string out(blen, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                            out.data(), blen, nullptr, nullptr);
+        return out;
+    }
+    case Encoding::Utf16LE:
+    {
+        std::string out(text.size() * 2, '\0');
+        for (size_t i = 0; i < text.size(); ++i)
+        {
+            out[i * 2]     = static_cast<char>(text[i] & 0xFF);
+            out[i * 2 + 1] = static_cast<char>((text[i] >> 8) & 0xFF);
+        }
+        return out;
+    }
+    case Encoding::Utf16BE:
+    {
+        std::string out(text.size() * 2, '\0');
+        for (size_t i = 0; i < text.size(); ++i)
+        {
+            out[i * 2]     = static_cast<char>((text[i] >> 8) & 0xFF);
+            out[i * 2 + 1] = static_cast<char>(text[i] & 0xFF);
+        }
+        return out;
+    }
+    case Encoding::Ansi:
+    {
+        UINT cp = GetACP();
+        int blen = WideCharToMultiByte(cp, 0, text.data(), static_cast<int>(text.size()),
+                                       nullptr, 0, nullptr, nullptr);
+        if (blen <= 0)
+            return {};
+        std::string out(blen, '\0');
+        WideCharToMultiByte(cp, 0, text.data(), static_cast<int>(text.size()),
+                            out.data(), blen, nullptr, nullptr);
+        return out;
+    }
+    }
+    return {};
+}

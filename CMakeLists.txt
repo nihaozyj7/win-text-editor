@@ -14,6 +14,8 @@ set(SRC_LIST
     src/CEditorWindow.cpp
     src/CTextBuffer.cpp
     src/Encoding.cpp
+    src/CLineIndex.cpp
+    src/CRenderer.cpp
 )
 
 add_executable(editor WIN32 ${SRC_LIST})
@@ -43,6 +45,7 @@ add_executable(core_tests
     tests/core_tests.cpp
     src/PieceTable.cpp
     src/Encoding.cpp
+    src/CLineIndex.cpp
 )
 target_compile_definitions(core_tests PRIVATE UNICODE _UNICODE)
 target_compile_options(core_tests PRIVATE
