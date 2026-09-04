@@ -184,6 +184,40 @@ unsigned char PieceTable::At(uint64_t ofs) const
     return 0;
 }
 
+uint64_t PieceTable::ReadRange(uint64_t ofs, unsigned char* dst, uint64_t len) const
+{
+    if (len == 0 || ofs >= m_size)
+        return 0;
+
+    // 定位到包含 ofs 的片段
+    uint64_t acc = 0;
+    auto it = m_pieces.begin();
+    while (it != m_pieces.end() && ofs >= acc + it->len)
+    {
+        acc += it->len;
+        ++it;
+    }
+
+    uint64_t copied = 0;
+    uint64_t remain = len;
+    while (it != m_pieces.end() && remain > 0)
+    {
+        uint64_t rel = (ofs >= acc) ? (ofs - acc) : 0;
+        uint64_t take = (it->len - rel < remain) ? (it->len - rel) : remain;
+        if (take == 0)
+            break;
+        const unsigned char* src = (it->src == Piece::Src::Original)
+            ? m_originalBase + it->off + rel
+            : m_addBuf.data() + it->off + rel;
+        std::memcpy(dst + copied, src, take);
+        copied += take;
+        remain -= take;
+        acc += it->len;
+        ++it;
+    }
+    return copied;
+}
+
 uint64_t PieceTable::CopyOut(unsigned char* dst, uint64_t maxLen) const
 {
     uint64_t copied = 0;

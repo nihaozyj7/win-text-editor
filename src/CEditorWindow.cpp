@@ -264,8 +264,9 @@ BOOL CEditorWindow::OpenFile(LPCWSTR szPath)
         return FALSE;
     }
 
-    // 构建行索引（MMF 全量只读扫描，O(字节)）
-    m_lineIndex.Build(m_buffer->GetBasePtr(), static_cast<uint64_t>(m_buffer->GetSize()));
+    // 构建行索引（编码感知；MMF 全量只读扫描）
+    m_lineIndex.Build(m_buffer->GetBasePtr(), static_cast<uint64_t>(m_buffer->GetSize()),
+                      m_buffer->GetEncoding());
 
     m_scrollLine = 0;
     m_caretRow = 0;

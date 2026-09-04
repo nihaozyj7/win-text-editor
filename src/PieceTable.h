@@ -44,6 +44,10 @@ public:
     // 读取单个逻辑字节
     unsigned char At(uint64_t ofs) const;
 
+    // 范围读取：从 ofs 起拷贝最多 len 字节到 dst（跨片段拼接）
+    // 返回实际拷贝的字节数（文件尾不足 len 时少于 len）
+    uint64_t ReadRange(uint64_t ofs, unsigned char* dst, uint64_t len) const;
+
     // 把整个逻辑内容拷贝到 dst（最多 maxLen 字节），返回实际拷贝数
     uint64_t CopyOut(unsigned char* dst, uint64_t maxLen) const;
 

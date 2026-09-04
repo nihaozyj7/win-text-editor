@@ -1,0 +1,32 @@
+这是一个用于查看渲染效果的测试文件。
+
+English line with ASCII only: The quick brown fox jumps over the lazy dog 0123456789
+
+中文与英文混合行：Hello 世界，Direct2D + DirectWrite 渲染测试。
+Emoji 行：😀 😃 😄 😁 😆 笑脸 emoji 测试
+第二行 emoji：🚀 火箭 🌍 地球 🎉 庆祝
+
+======================== 分割线 ========================
+
+下面测试多行与滚动：
+Line 1
+Line 2
+Line 3
+Line 4
+Line 5
+Line 6
+Line 7
+Line 8
+Line 9
+Line 10
+Line 11
+Line 12
+Line 13
+Line 14
+Line 15
+Line 16
+Line 17
+Line 18
+Line 19
+Line 20
+最后一行的结尾。

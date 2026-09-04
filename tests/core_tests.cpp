@@ -167,6 +167,58 @@ static void TestLineIndex()
     CHECK(idx.ByteOffsetToRow(13) == 3);   // 'j'
 }
 
+// 行索引基于 PieceTable 逻辑字节源构建（编辑后使用路径）
+static void TestLineIndexOnPieceTable()
+{
+    const char* text = "line1\nline2\nline3\nline4";
+    PieceTable pt;
+    pt.SetOriginal(reinterpret_cast<const unsigned char*>(text), std::strlen(text));
+
+    CLineIndex idx;
+    idx.Build(
+        [&pt](uint64_t ofs, unsigned char* dst, uint64_t maxLen) -> uint64_t {
+            return pt.ReadRange(ofs, dst, maxLen);
+        },
+        pt.Size(), Encoding::Utf8);
+
+    CHECK(idx.GetLineCount() == 4);
+    CHECK(idx.GetLineStart(2) == 12);   // "line3"
+
+    // 在 line2 末尾插入换行 → line3 前多一行
+    const char* nl = "\n";
+    pt.Insert(11, reinterpret_cast<const unsigned char*>(nl), 1);
+    idx.Build(
+        [&pt](uint64_t ofs, unsigned char* dst, uint64_t maxLen) -> uint64_t {
+            return pt.ReadRange(ofs, dst, maxLen);
+        },
+        pt.Size(), Encoding::Utf8);
+
+    CHECK(pt.Size() == std::strlen(text) + 1);
+    CHECK(idx.GetLineCount() == 5);
+    CHECK(idx.GetLineStart(3) == 13);   // 原 line3 前多出空行，行首后移 1 字节
+    CHECK(idx.GetLineStart(2) == 12);   // 空行
+}
+
+// UTF-16 LE 换行扫描（BOM 后为 code units）
+static void TestLineIndexUtf16()
+{
+    // "a\nb\r\nc" 以 UTF-16LE 表示
+    const unsigned char bytes[] = {
+        'a', 0, '\n', 0,     // a\n
+        'b', 0, '\r', 0, '\n', 0,  // b\r\n
+        'c', 0
+    };
+    CLineIndex idx;
+    idx.Build(bytes, sizeof(bytes), Encoding::Utf16LE);
+
+    CHECK(idx.GetLineCount() == 3);
+    CHECK(idx.GetLineStart(1) == 4);
+    CHECK(idx.GetLineStart(2) == 10);
+    CHECK(idx.ByteOffsetToRow(3) == 0);   // 'a' 行尾 \n 内部
+    CHECK(idx.ByteOffsetToRow(4) == 1);   // 'b'
+    CHECK(idx.ByteOffsetToRow(10) == 2);  // 'c'
+}
+
 int main()
 {
     std::printf("== core_tests ==\n");
@@ -176,6 +228,8 @@ int main()
     TestPieceTableManyUndo();
     TestEncodingDetection();
     TestLineIndex();
+    TestLineIndexOnPieceTable();
+    TestLineIndexUtf16();
 
     if (g_failures == 0)
     {
