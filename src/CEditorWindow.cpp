@@ -114,6 +114,7 @@ CEditorWindow::CEditorWindow()
     , m_hMenu(nullptr)
     , m_renderer(std::make_unique<CRenderer>())
     , m_encoding(Encoding::Utf8)
+    , m_bomBytes(0)
     , m_dirty(false)
     , m_scrollLine(0)
     , m_caretRow(0)
@@ -411,6 +412,15 @@ void CEditorWindow::RebuildDocument()
         const BYTE* base = m_buffer->GetBasePtr();
         uint64_t size = static_cast<uint64_t>(m_buffer->GetSize());
         m_encoding = m_buffer->GetEncoding();
+        m_bomBytes = 0;
+
+        // 探测 BOM 字节数（GetLineText 会剥离 U+FEFF 显示字符；偏移换算需补回）
+        if (size >= 3 && base[0] == 0xEF && base[1] == 0xBB && base[2] == 0xBF)
+            m_bomBytes = 3;
+        else if (size >= 2 && ((base[0] == 0xFF && base[1] == 0xFE) ||
+                               (base[0] == 0xFE && base[1] == 0xFF)))
+            m_bomBytes = 2;
+
         m_piece.SetOriginal(base, size);
         m_lineIndex.Build(
             [this](uint64_t ofs, unsigned char* dst, uint64_t maxLen) -> uint64_t {
@@ -422,6 +432,7 @@ void CEditorWindow::RebuildDocument()
     {
         // 空文档（新建）：视为 1 个空行
         m_encoding = Encoding::Utf8;
+        m_bomBytes = 0;
         m_piece.SetOriginal(nullptr, 0);
         m_lineIndex.Build(
             [this](uint64_t ofs, unsigned char* dst, uint64_t maxLen) -> uint64_t {
@@ -654,8 +665,8 @@ std::wstring CEditorWindow::GetLineText(DWORD row) const
     while (!text.empty() && (text.back() == L'\n' || text.back() == L'\r'))
         text.pop_back();
 
-    // 首行剔除 BOM 字符
-    if (row == 0 && !text.empty() && text[0] == 0xFEFF)
+    // 首行若为 BOM 文件，剥离解码出的 BOM 字符（显示用；字节偏移换算另行补回）
+    if (row == 0 && m_bomBytes > 0 && !text.empty() && text[0] == 0xFEFF)
         text.erase(text.begin());
 
     return text;
@@ -1033,7 +1044,7 @@ uint64_t CEditorWindow::DocOffsetToRow(uint64_t ofs) const
 }
 
 // (row, col) → 文档逻辑字节偏移
-// col 是"不含行尾换行、不含首行BOM"的显示文本列；换算时需补回 BOM/行首偏差
+// col 是"不含行尾换行"的显示文本列；首行还有 BOM（m_bomBytes）位于行首字节
 uint64_t CEditorWindow::PosToByte(DWORD row, DWORD col) const
 {
     if (!m_lineIndex.IsValid())
@@ -1048,8 +1059,10 @@ uint64_t CEditorWindow::PosToByte(DWORD row, DWORD col) const
 
     std::string prefix = EncodeFromWide(line.substr(0, col), m_encoding);
 
+    // 该行"显示内容"在文件中起点：行首 + 首行 BOM 字节
     uint64_t lineStart = m_lineIndex.GetLineStart(row);
-    return lineStart + prefix.size();
+    uint64_t contentStart = lineStart + (row == 0 ? m_bomBytes : 0);
+    return contentStart + prefix.size();
 }
 
 // 文档逻辑字节偏移 → (row, col)，col 为该行文本的 code unit 列
@@ -1068,14 +1081,18 @@ void CEditorWindow::ByteToPos(uint64_t ofs, DWORD* pRow, DWORD* pCol) const
 
     std::wstring line = GetLineText(row);
     uint64_t lineStart = m_lineIndex.GetLineStart(row);
+    uint64_t contentStart = lineStart + (row == 0 ? m_bomBytes : 0);
 
-    // 行内字节偏移
-    uint64_t lineSize = m_lineIndex.GetLineLength(row);
-    uint64_t rel = ofs - lineStart;
-    if (rel > lineSize)
-        rel = lineSize;
+    if (ofs < contentStart)
+    {
+        *pCol = 0;
+        return;
+    }
 
-    // 从行首起逐 code point 累计字节，直到 >= rel
+    // 行内内容字节偏移
+    uint64_t rel = ofs - contentStart;
+
+    // 从行首起逐 code point 累计编码字节，直到 >= rel
     std::string prefix;
     DWORD col = 0;
     while (col < line.size())
@@ -1083,7 +1100,7 @@ void CEditorWindow::ByteToPos(uint64_t ofs, DWORD* pRow, DWORD* pCol) const
         size_t n = (IsHighSurrogate(line[col]) && col + 1 < line.size() &&
                     IsLowSurrogate(line[col + 1])) ? 2 : 1;
         std::string enc = EncodeFromWide(line.substr(col, n), m_encoding);
-        if (prefix.size() + enc.size() >= rel)
+        if (prefix.size() + enc.size() > rel)
             break;
         prefix += enc;
         col += static_cast<DWORD>(n);

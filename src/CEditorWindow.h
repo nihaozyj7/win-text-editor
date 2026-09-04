@@ -93,6 +93,7 @@ private:
 
     // 编码：打开时检测；另存时可由用户改（v1 保持检测值）
     Encoding m_encoding;
+    DWORD    m_bomBytes;   // 文件头 BOM 字节数（0/2/3），编辑偏移换算用
     std::wstring m_filePath;
     bool m_dirty;
 
