@@ -3,3 +3,8 @@ build/
 *.exe
 *.o
 *.obj
+# 大文件测试样本
+big_*.txt
+test_*.txt
+*.log
+*.png
