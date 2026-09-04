@@ -12,6 +12,8 @@ set(CMAKE_MAKE_PROGRAM "C:/Users/Easecat/Application/mingw64/bin/ninja.exe")
 set(SRC_LIST
     src/main.cpp
     src/CEditorWindow.cpp
+    src/CTextBuffer.cpp
+    src/Encoding.cpp
 )
 
 add_executable(editor WIN32 ${SRC_LIST})

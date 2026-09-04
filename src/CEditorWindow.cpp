@@ -1,5 +1,8 @@
 #include "CEditorWindow.h"
 #include <commctrl.h>
+#include <commdlg.h>
+#include <sstream>
+#include <iomanip>
 
 namespace
 {
@@ -15,7 +18,34 @@ namespace
     constexpr int kFontId      = 202;
     constexpr int kStatusBarId = 301;
 
-    constexpr int kStatusBarHeight = 22;
+    // 编码名称（状态栏显示用）
+    const wchar_t* EncodingName(Encoding enc)
+    {
+        switch (enc)
+        {
+        case Encoding::Utf8:    return L"UTF-8";
+        case Encoding::Utf16LE: return L"UTF-16 LE";
+        case Encoding::Utf16BE: return L"UTF-16 BE";
+        case Encoding::Ansi:    return L"ANSI/GBK";
+        }
+        return L"未知";
+    }
+
+    // 人类可读的文件大小
+    std::wstring FormatSize(LONGLONG bytes)
+    {
+        static const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB" };
+        double value = static_cast<double>(bytes);
+        int unit = 0;
+        while (value >= 1024.0 && unit < 3)
+        {
+            value /= 1024.0;
+            ++unit;
+        }
+        std::wstringstream ss;
+        ss << std::fixed << std::setprecision(2) << value << L" " << units[unit];
+        return ss.str();
+    }
 }
 
 CEditorWindow::CEditorWindow()
@@ -140,6 +170,20 @@ void CEditorWindow::OnCommand(WORD commandId)
 {
     switch (commandId)
     {
+    case kOpenId:
+    {
+        wchar_t path[MAX_PATH * 4] = { 0 };
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = m_hwnd;
+        ofn.lpstrFilter = L"所有文件(*.*)\0*.*\0文本文件(*.txt)\0*.txt\0";
+        ofn.lpstrFile = path;
+        ofn.nMaxFile = MAX_PATH * 4;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        if (GetOpenFileNameW(&ofn))
+            OpenFile(path);
+        break;
+    }
     case kExitId:
         Destroy();
         break;
@@ -148,18 +192,76 @@ void CEditorWindow::OnCommand(WORD commandId)
         // 切换状态栏勾选状态并显示/隐藏
         bool checked = !m_hStatusBar;
         CheckMenuItem(m_hMenu, kStatusBarId, checked ? MF_CHECKED : MF_UNCHECKED);
-        ShowWindow(m_hStatusBar, checked ? SW_SHOW : SW_HIDE);
-        if (!checked)
+        if (checked)
+        {
+            m_hStatusBar = CreateStatusWindowW(WS_CHILD | WS_VISIBLE, L"就绪", m_hwnd, kStatusBarId);
+            int parts[3] = { 200, 400, -1 };
+            SendMessageW(m_hStatusBar, SB_SETPARTS, 3, reinterpret_cast<LPARAM>(parts));
+        }
+        else
         {
             DestroyWindow(m_hStatusBar);
             m_hStatusBar = nullptr;
         }
         OnResize();
+        UpdateStatusBar();
         break;
     }
     default:
         break;
     }
+}
+
+BOOL CEditorWindow::OpenFile(LPCWSTR szPath)
+{
+    m_buffer = std::make_unique<CTextBuffer>();
+    if (!m_buffer->OpenFile(szPath))
+    {
+        m_buffer.reset();
+        wchar_t msg[1024];
+        wsprintfW(msg, L"无法打开文件:\n%s", szPath);
+        MessageBoxW(m_hwnd, msg, L"错误", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    UpdateTitle();
+    UpdateStatusBar();
+    InvalidateRect(m_hwnd, nullptr, TRUE);
+    return TRUE;
+}
+
+void CEditorWindow::UpdateTitle()
+{
+    if (m_buffer && m_buffer->GetPath()[0])
+    {
+        std::wstring title = m_buffer->GetPath();
+        title += L" - 文本编辑器";
+        SetWindowTextW(m_hwnd, title.c_str());
+    }
+    else
+    {
+        SetWindowTextW(m_hwnd, kWindowTitle);
+    }
+}
+
+void CEditorWindow::UpdateStatusBar()
+{
+    if (!m_hStatusBar)
+        return;
+
+    if (!m_buffer)
+    {
+        SendMessageW(m_hStatusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(L"就绪"));
+        SendMessageW(m_hStatusBar, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(L""));
+        SendMessageW(m_hStatusBar, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(L""));
+        return;
+    }
+
+    std::wstring sizeText = FormatSize(m_buffer->GetSize());
+    std::wstring encodingText = EncodingName(m_buffer->GetEncoding());
+
+    SendMessageW(m_hStatusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(sizeText.c_str()));
+    SendMessageW(m_hStatusBar, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(encodingText.c_str()));
+    SendMessageW(m_hStatusBar, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(m_buffer->GetPath()));
 }
 
 void CEditorWindow::OnResize()

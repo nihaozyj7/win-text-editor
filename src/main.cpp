@@ -21,6 +21,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
         CEditorWindow window;
         if (window.Create(hInstance, nCmdShow))
         {
+            // 命令行第一参数作为要打开的文件路径
+            int argc = 0;
+            LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+            if (argv)
+            {
+                if (argc > 1)
+                    window.OpenFile(argv[1]);
+                LocalFree(argv);
+            }
             exitCode = window.Run();
         }
         else
