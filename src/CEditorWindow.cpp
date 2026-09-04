@@ -7,6 +7,7 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <cstring>
 #include <imm.h>
 
 namespace
@@ -21,6 +22,8 @@ namespace
     constexpr int kExitId      = 105;
     constexpr int kUndoId      = 111;
     constexpr int kRedoId      = 112;
+    constexpr int kCopyId      = 113;
+    constexpr int kPasteId     = 114;
     constexpr int kStatusBarId = 301;
 
     constexpr UINT_PTR kCaretTimer = 1;
@@ -167,6 +170,9 @@ BOOL CEditorWindow::Create(HINSTANCE hInstance, int nCmdShow)
     HMENU hEdit = CreatePopupMenu();
     AppendMenuW(hEdit, MF_STRING, kUndoId, L"撤销(&U)\tCtrl+Z");
     AppendMenuW(hEdit, MF_STRING, kRedoId, L"重做(&R)\tCtrl+Y");
+    AppendMenuW(hEdit, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hEdit, MF_STRING, kCopyId,  L"复制(&C)\tCtrl+C");
+    AppendMenuW(hEdit, MF_STRING, kPasteId, L"粘贴(&P)\tCtrl+V");
     AppendMenuW(hMenubar, MF_POPUP, reinterpret_cast<UINT_PTR>(hEdit), L"编辑(&E)");
 
     HMENU hView = CreatePopupMenu();
@@ -381,6 +387,14 @@ void CEditorWindow::OnCommand(WORD commandId)
 
     case kRedoId:
         Redo();
+        break;
+
+    case kCopyId:
+        CopySelection();
+        break;
+
+    case kPasteId:
+        PasteFromClipboard();
         break;
 
     case kStatusBarId:
@@ -1349,6 +1363,105 @@ void CEditorWindow::Redo()
     }
 }
 
+// ---------------- 剪贴板 ----------------
+
+bool CEditorWindow::SetClipboardText(const std::wstring& text)
+{
+    if (!OpenClipboard(m_hwnd))
+        return false;
+    EmptyClipboard();
+
+    SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!h)
+    {
+        CloseClipboard();
+        return false;
+    }
+
+    wchar_t* p = static_cast<wchar_t*>(GlobalLock(h));
+    if (!p)
+    {
+        GlobalFree(h);
+        CloseClipboard();
+        return false;
+    }
+    memcpy(p, text.c_str(), bytes);
+    GlobalUnlock(h);
+
+    // 成功后所有权移交系统；失败才需要自行释放
+    if (!SetClipboardData(CF_UNICODETEXT, h))
+        GlobalFree(h);
+    CloseClipboard();
+    return true;
+}
+
+void CEditorWindow::CopySelection()
+{
+    if (!HasSelection())
+        return;
+    NormalizeSelection();
+
+    std::wstring text;
+    if (m_selAnchorRow == m_selCaretRow)
+    {
+        std::wstring line = GetLineText(m_selAnchorRow);
+        if (m_selAnchorCol < line.size())
+        {
+            DWORD end = std::min(m_selCaretCol, static_cast<DWORD>(line.size()));
+            text = line.substr(m_selAnchorCol, end - m_selAnchorCol);
+        }
+    }
+    else
+    {
+        // 跨行：首行从锚点到行尾，中间整行，末行到光标；行间以 \r\n 连接
+        for (DWORD row = m_selAnchorRow; row <= m_selCaretRow; ++row)
+        {
+            std::wstring line = GetLineText(row);
+            DWORD start = (row == m_selAnchorRow) ? m_selAnchorCol : 0;
+            DWORD end   = (row == m_selCaretRow)
+                        ? std::min(m_selCaretCol, static_cast<DWORD>(line.size()))
+                        : static_cast<DWORD>(line.size());
+            if (start < end)
+                text += line.substr(start, end - start);
+            if (row < m_selCaretRow)
+                text += L"\r\n";
+        }
+    }
+
+    if (!text.empty())
+        SetClipboardText(text);
+}
+
+void CEditorWindow::PasteFromClipboard()
+{
+    if (!m_lineIndex.IsValid())
+        return;
+    if (!OpenClipboard(m_hwnd))
+        return;
+
+    std::wstring text;
+    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+    if (h)
+    {
+        const wchar_t* p = static_cast<const wchar_t*>(GlobalLock(h));
+        if (p)
+        {
+            // 按 GlobalSize 兜底扫描 NUL，不依赖缓冲一定以 NUL 结尾
+            SIZE_T maxLen = GlobalSize(h) / sizeof(wchar_t);
+            SIZE_T len = 0;
+            while (len < maxLen && p[len] != L'\0')
+                ++len;
+            text.assign(p, static_cast<size_t>(len));
+            GlobalUnlock(h);
+        }
+    }
+    CloseClipboard();
+
+    if (!text.empty())
+        InsertTextAtCaret(text);
+}
+
 // ---------------- 鼠标 / 键盘 / IME ----------------
 
 void CEditorWindow::OnMouseClick(WPARAM wParam, LPARAM lParam, UINT clickCount)
@@ -1502,6 +1615,8 @@ void CEditorWindow::OnKeyDown(WPARAM wParam)
         case 'Y': case 'y': Redo(); return;
         case 'N': case 'n': OnCommand(kNewId); return;
         case 'O': case 'o': OnCommand(kOpenId); return;
+        case 'C': case 'c': CopySelection(); return;
+        case 'V': case 'v': PasteFromClipboard(); return;
         case 'A': case 'a':
             if (m_lineIndex.IsValid())
             {

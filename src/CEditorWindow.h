@@ -69,6 +69,11 @@ private:
     void         Undo();
     void         Redo();
 
+    // ---- 剪贴板 ----
+    void         CopySelection();       // 选区 → 剪贴板（跨行用 \r\n 连接）
+    void         PasteFromClipboard();  // 剪贴板 → 光标处（CF_UNICODETEXT）
+    bool         SetClipboardText(const std::wstring& text);
+
     // ---- 选区 ----
     void         BeginSelectionAnchor();      // 在光标处设锚点
     void         SelectWordAt(DWORD row, DWORD col);
