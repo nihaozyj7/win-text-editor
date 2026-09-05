@@ -9,6 +9,7 @@ PieceTable::PieceTable()
     , m_originalSize(0)
     , m_lastUndoOfs(0)
     , m_lastRedoOfs(0)
+    , m_historyTrimmed(0)
 {
 }
 
@@ -20,6 +21,7 @@ void PieceTable::SetOriginal(const unsigned char* base, uint64_t size)
     m_addBuf.clear();
     m_undoStack.clear();
     m_redoStack.clear();
+    m_historyTrimmed = 0;
     m_lastUndoOfs = 0;
     m_lastRedoOfs = 0;
 
@@ -43,7 +45,10 @@ void PieceTable::Insert(uint64_t ofs, const unsigned char* data, uint32_t len, b
         m_undoStack.push_back(std::move(cmd));
         m_redoStack.clear();
         if (m_undoStack.size() > kMaxUndo)
+        {
             m_undoStack.erase(m_undoStack.begin());
+            ++m_historyTrimmed;
+        }
     }
 
     // 追加到 addBuf，记录偏移
@@ -86,7 +91,10 @@ void PieceTable::Erase(uint64_t ofs, uint32_t len, bool record)
         m_undoStack.push_back(std::move(cmd));
         m_redoStack.clear();
         if (m_undoStack.size() > kMaxUndo)
+        {
             m_undoStack.erase(m_undoStack.begin());
+            ++m_historyTrimmed;
+        }
 
         m_size -= (len - remain);
         return;
@@ -151,6 +159,11 @@ uint64_t PieceTable::UndoOffset() const
 uint64_t PieceTable::RedoOffset() const
 {
     return m_lastRedoOfs;
+}
+
+size_t PieceTable::HistoryPosition() const
+{
+    return m_historyTrimmed + m_undoStack.size();
 }
 
 uint64_t PieceTable::Size() const

@@ -4,16 +4,20 @@
 #include <windowsx.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
+#include <shlobj.h>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
 #include <cstring>
+#include <cwchar>
 #include <imm.h>
 
 namespace
 {
     constexpr wchar_t kWindowClassName[] = L"TextEditorMainWindow";
-    constexpr wchar_t kWindowTitle[] = L"无标题 - 文本编辑器";
+    constexpr wchar_t kWindowTitle[] = L"无标题";
 
     constexpr int kNewId       = 101;
     constexpr int kOpenId      = 102;
@@ -25,9 +29,41 @@ namespace
     constexpr int kCopyId      = 113;
     constexpr int kPasteId     = 114;
     constexpr int kStatusBarId = 301;
+    constexpr int kVScrollId   = 302;   // 编辑区垂直滚动条（子控件）
+    constexpr int kHScrollId   = 303;   // 编辑区水平滚动条（子控件）
+
+    // 查看
+    constexpr int kLineNumbersId = 310;   // 显示行号
+    constexpr int kWordWrapId    = 311;   // 自动换行
+    constexpr int kHideMenuBarId  = 312;   // 隐藏菜单栏（隐藏后 Alt 临时呼出）
+    // 设置：内边距
+    constexpr int kPaddingNoneId   = 320;
+    constexpr int kPaddingSmallId  = 321;
+    constexpr int kPaddingMediumId = 322;
+    constexpr int kPaddingLargeId  = 323;
+    // 设置：行高
+    constexpr int kLineHeight10Id = 330;
+    constexpr int kLineHeight12Id = 331;
+    constexpr int kLineHeight15Id = 332;
+    constexpr int kLineHeight20Id = 333;
+    // 设置：字体（点击弹出 ChooseFont 设置对应槽位；回退链 主→次→系统）
+    constexpr int kFontPrimaryId   = 340;
+    constexpr int kFontSecondaryId = 341;
+    constexpr int kFontSizeUpId     = 342;   // 增大字号 Ctrl+= / Ctrl+滚轮上
+    constexpr int kFontSizeDownId   = 343;   // 减小字号 Ctrl+- / Ctrl+滚轮下
+    constexpr int kFontSizeResetId  = 344;   // 重置字号 Ctrl+0
+    // 设置：主题
+    constexpr int kThemeSystemId = 350;
+    constexpr int kThemeLightId  = 351;
+    constexpr int kThemeDarkId   = 352;
+    constexpr int kAboutId       = 400;
 
     constexpr UINT_PTR kCaretTimer = 1;
     constexpr UINT      kCaretBlinkMs = 530;
+
+    // 光标行视觉高度累计的扫描上限（行数/字符预算），超过则走快速跳转路径
+    constexpr DWORD kVisualScanMaxRows = 120;
+    constexpr int   kVisualScanCharBudget = 4 * 1024 * 1024;
 
     const wchar_t* EncodingName(Encoding enc)
     {
@@ -54,6 +90,95 @@ namespace
         std::wstringstream ss;
         ss << std::fixed << std::setprecision(2) << value << L" " << units[unit];
         return ss.str();
+    }
+
+    // 设置持久化文件：%APPDATA%\TextEditor\settings.ini
+    std::wstring SettingsFilePath()
+    {
+        wchar_t path[MAX_PATH] = {};
+        if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, path)))
+            return {};
+        std::wstring dir = std::wstring(path) + L"\\TextEditor";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        return dir + L"\\settings.ini";
+    }
+
+    // 把窗口矩形拉回最近显示器的工作区：
+    // 显示器被拔掉/分辨率变更后，保存的坐标可能整体落到屏幕外
+    void ClampRectToWorkArea(RECT* rc)
+    {
+        HMONITOR hm = MonitorFromRect(rc, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (!hm || !GetMonitorInfoW(hm, &mi))
+            return;
+        const RECT& wa = mi.rcWork;
+        int w = rc->right - rc->left;
+        int h = rc->bottom - rc->top;
+        // 尺寸不超过工作区（换到更小的屏幕）
+        if (w > wa.right - wa.left) w = wa.right - wa.left;
+        if (h > wa.bottom - wa.top) h = wa.bottom - wa.top;
+
+        int visW = (rc->right < wa.right ? rc->right : wa.right)
+                 - (rc->left > wa.left ? rc->left : wa.left);
+        int visH = (rc->bottom < wa.bottom ? rc->bottom : wa.bottom)
+                 - (rc->top > wa.top ? rc->top : wa.top);
+        if (visW < 120 || visH < 60)
+        {
+            // 主体在屏幕外：整体居中搬回工作区
+            rc->left = wa.left + ((wa.right - wa.left) - w) / 2;
+            rc->top  = wa.top  + ((wa.bottom - wa.top) - h) / 2;
+        }
+        else
+        {
+            // 部分可见：轻推回来，保证标题栏可抓取
+            if (rc->top < wa.top)        rc->top  = wa.top;
+            if (rc->bottom > wa.bottom)  rc->top  = wa.bottom - h;
+            if (rc->right < wa.left + 120) rc->left = wa.left;
+            if (rc->left > wa.right - 120) rc->left = wa.right - w;
+        }
+        rc->right  = rc->left + w;
+        rc->bottom = rc->top + h;
+    }
+
+    // 统计系统里已存在的同类主窗口（多实例级联摆放用）
+    BOOL CALLBACK CountSameClassWndProc(HWND hwnd, LPARAM lp)
+    {
+        wchar_t cls[64]{};
+        if (GetClassNameW(hwnd, cls, 64) && wcscmp(cls, kWindowClassName) == 0)
+            ++*reinterpret_cast<int*>(lp);
+        return TRUE;
+    }
+
+    // 读取上次关闭时保存的窗口位置/大小；无记录或记录非法返回 false。
+    // 独立于 LoadSettings：窗口位置必须在 CreateWindowExW 之前拿到
+    bool LoadWindowPlacement(RECT* rc, bool* maximized)
+    {
+        std::wstring ini = SettingsFilePath();
+        *maximized = false;
+        if (ini.empty())
+            return false;
+
+        wchar_t buf[32]{};
+        auto readInt = [&](LPCWSTR key, int def) {
+            GetPrivateProfileStringW(L"Window", key, L"", buf, 32, ini.c_str());
+            return buf[0] ? _wtoi(buf) : def;
+        };
+
+        int x = readInt(L"X", 0);
+        int y = readInt(L"Y", 0);
+        int w = readInt(L"Width", 0);
+        int h = readInt(L"Height", 0);
+        *maximized = readInt(L"Maximized", 0) != 0;
+
+        if (w <= 0 || h <= 0)
+            return false;   // 尚无记录
+        if (w < 200) w = 200;   // 过小视为脏数据
+        if (h < 120) h = 120;
+
+        *rc = { x, y, x + w, y + h };
+        ClampRectToWorkArea(rc);
+        return true;
     }
 
     bool IsHighSurrogate(wchar_t c) { return c >= 0xD800 && c <= 0xDBFF; }
@@ -114,11 +239,14 @@ CEditorWindow::CEditorWindow()
     : m_hInstance(nullptr)
     , m_hwnd(nullptr)
     , m_hStatusBar(nullptr)
+    , m_hVScroll(nullptr)
+    , m_hHScroll(nullptr)
     , m_hMenu(nullptr)
     , m_renderer(std::make_unique<CRenderer>())
     , m_encoding(Encoding::Utf8)
     , m_bomBytes(0)
     , m_dirty(false)
+    , m_savedUndoDepth(0)
     , m_scrollLine(0)
     , m_caretRow(0)
     , m_caretCol(0)
@@ -129,6 +257,24 @@ CEditorWindow::CEditorWindow()
     , m_selCaretCol(0)
     , m_caretVisible(true)
     , m_hasFocus(false)
+    , m_showStatusBar(true)
+    , m_hideMenuBar(false)
+    , m_menuBarTempShown(false)
+    , m_altOtherKey(false)
+    , m_showLineNumbers(false)
+    , m_wordWrap(true)
+    , m_lineHeightFactor(1.2f)
+    , m_fontSize(14.0f)
+    , m_pad{ 8, 8, 8, 8 }
+    , m_themeMode(ThemeFollowSystem)
+    , m_fontPrimary(L"Consolas")
+    , m_fontSecondary(L"微软雅黑")
+    , m_hScrollPos(0.0f)
+    , m_maxLineWidth(0.0f)
+    , m_visualEpochSeen(0)
+    , m_visualEpoch(0)
+    , m_statusBgBrush(nullptr)
+    , m_statusFgColor(RGB(0, 0, 0))
 {
 }
 
@@ -143,7 +289,9 @@ void CEditorWindow::RegisterWindowClass(HINSTANCE hInstance)
     wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc   = CEditorWindow::WndProc;
     wc.hInstance     = hInstance;
-    wc.hIcon         = LoadIconW(nullptr, IDI_APPLICATION);
+    // 加载 resources/editor.rc 中嵌入的应用图标（ID=1），标题栏/任务栏/Alt+Tab 均显示
+    wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
+    wc.hIconSm       = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = kWindowClassName;
@@ -175,23 +323,95 @@ BOOL CEditorWindow::Create(HINSTANCE hInstance, int nCmdShow)
     AppendMenuW(hEdit, MF_STRING, kPasteId, L"粘贴(&P)\tCtrl+V");
     AppendMenuW(hMenubar, MF_POPUP, reinterpret_cast<UINT_PTR>(hEdit), L"编辑(&E)");
 
+    // 查看菜单：显示开关 + 外观设置（原"设置"菜单已并入）
     HMENU hView = CreatePopupMenu();
-    AppendMenuW(hView, MF_STRING | MF_CHECKED, kStatusBarId, L"状态栏(&S)");
+    AppendMenuW(hView, MF_STRING, kStatusBarId,    L"状态栏(&S)");
+    AppendMenuW(hView, MF_STRING, kLineNumbersId,  L"显示行号(&L)");
+    AppendMenuW(hView, MF_STRING, kWordWrapId,     L"自动换行(&W)");
+    AppendMenuW(hView, MF_STRING, kHideMenuBarId,  L"隐藏菜单栏(&M)\t（Alt 临时呼出）");
+    AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
+
+    HMENU hPadding = CreatePopupMenu();
+    AppendMenuW(hPadding, MF_STRING, kPaddingNoneId,   L"无");
+    AppendMenuW(hPadding, MF_STRING, kPaddingSmallId,  L"小 (4px)");
+    AppendMenuW(hPadding, MF_STRING, kPaddingMediumId, L"中 (8px)");
+    AppendMenuW(hPadding, MF_STRING, kPaddingLargeId,  L"大 (16px)");
+    AppendMenuW(hView, MF_POPUP, reinterpret_cast<UINT_PTR>(hPadding), L"内边距(&P)");
+
+    HMENU hLineHeight = CreatePopupMenu();
+    AppendMenuW(hLineHeight, MF_STRING, kLineHeight10Id, L"1.0 倍");
+    AppendMenuW(hLineHeight, MF_STRING, kLineHeight12Id, L"1.2 倍");
+    AppendMenuW(hLineHeight, MF_STRING, kLineHeight15Id, L"1.5 倍");
+    AppendMenuW(hLineHeight, MF_STRING, kLineHeight20Id, L"2.0 倍");
+    AppendMenuW(hView, MF_POPUP, reinterpret_cast<UINT_PTR>(hLineHeight), L"行高(&H)");
+
+    HMENU hFont = CreatePopupMenu();
+    AppendMenuW(hFont, MF_STRING, kFontPrimaryId,   L"主字体(&P)：Consolas");
+    AppendMenuW(hFont, MF_STRING, kFontSecondaryId, L"次要字体(&S)：微软雅黑");
+    AppendMenuW(hFont, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hFont, MF_STRING, kFontSizeUpId,    L"增大字号(&I)\tCtrl+=");
+    AppendMenuW(hFont, MF_STRING, kFontSizeDownId,  L"减小字号(&D)\tCtrl+-");
+    AppendMenuW(hFont, MF_STRING, kFontSizeResetId, L"重置字号(&R)\tCtrl+0");
+    AppendMenuW(hView, MF_POPUP, reinterpret_cast<UINT_PTR>(hFont), L"字体(&F)");
+
+    HMENU hTheme = CreatePopupMenu();
+    AppendMenuW(hTheme, MF_STRING, kThemeSystemId, L"跟随系统(&S)");
+    AppendMenuW(hTheme, MF_STRING, kThemeLightId,  L"浅色(&L)");
+    AppendMenuW(hTheme, MF_STRING, kThemeDarkId,   L"深色(&D)");
+    AppendMenuW(hView, MF_POPUP, reinterpret_cast<UINT_PTR>(hTheme), L"主题(&T)");
+
     AppendMenuW(hMenubar, MF_POPUP, reinterpret_cast<UINT_PTR>(hView), L"查看(&V)");
+
+    HMENU hHelp = CreatePopupMenu();
+    AppendMenuW(hHelp, MF_STRING, kAboutId, L"关于文本编辑器(&A)");
+    AppendMenuW(hMenubar, MF_POPUP, reinterpret_cast<UINT_PTR>(hHelp), L"帮助(&H)");
 
     m_hMenu = hMenubar;
 
+    // 上次关闭时的位置/大小；无记录则走默认（900x600 + CW_USEDEFAULT 位置）
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    int w = 900, h = 600;
+    bool maximized = false;
+    RECT rcPlacement{};
+    if (LoadWindowPlacement(&rcPlacement, &maximized))
+    {
+        x = rcPlacement.left;
+        y = rcPlacement.top;
+        w = rcPlacement.right - rcPlacement.left;
+        h = rcPlacement.bottom - rcPlacement.top;
+    }
+
+    // 多实例级联：创建前统计同类窗口数，创建后整体偏移摆放，避免完全重叠
+    int existingWindows = 0;
+    EnumWindows(CountSameClassWndProc, reinterpret_cast<LPARAM>(&existingWindows));
+
     m_hwnd = CreateWindowExW(
         0, kWindowClassName, kWindowTitle,
-        WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
-        CW_USEDEFAULT, CW_USEDEFAULT, 900, 600,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,   // 滚动条用编辑区子控件（不占状态栏行）
+        x, y, w, h,
         nullptr, hMenubar, hInstance, this);
 
     if (!m_hwnd)
         return FALSE;
 
+    // 已有实例时级联偏移（每级 32px，8 级回绕；最大化时无意义跳过）。
+    // 在 ShowWindow 之前调整，窗口尚不可见，不会闪动
+    if (existingWindows > 0 && !maximized)
+    {
+        int off = (existingWindows % 8) * 32;
+        RECT rc{};
+        if (off > 0 && GetWindowRect(m_hwnd, &rc))
+        {
+            rc.left += off;
+            rc.top += off;
+            ClampRectToWorkArea(&rc);
+            SetWindowPos(m_hwnd, nullptr, rc.left, rc.top, 0, 0,
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+        }
+    }
+
     SetWindowLongPtrW(m_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-    ShowWindow(m_hwnd, nCmdShow);
+    ShowWindow(m_hwnd, maximized ? SW_SHOWMAXIMIZED : nCmdShow);
     UpdateWindow(m_hwnd);
     return TRUE;
 }
@@ -255,21 +475,53 @@ LRESULT CEditorWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         OnScroll(wParam, lParam);
         return 0;
 
+    case WM_HSCROLL:
+        OnHScroll(wParam, lParam);
+        return 0;
+
     case WM_MOUSEWHEEL:
     {
         short delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        if (GetKeyState(VK_CONTROL) & 0x8000)
+        {
+            // Ctrl+滚轮：字号缩放（上滚增大）
+            ChangeFontSize(delta > 0 ? +1.0f : -1.0f);
+            return 0;
+        }
+        if (GetKeyState(VK_SHIFT) & 0x8000)
+        {
+            // Shift+滚轮：水平滚动（像素）
+            if (m_hHScroll && m_hScrollPos > 0 || IsWindowVisible(m_hHScroll))
+            {
+                float px = m_hScrollPos - static_cast<float>(delta);
+                SCROLLINFO si{};
+                si.cbSize = sizeof(si);
+                si.fMask = SIF_ALL;
+                GetScrollInfo(m_hHScroll, SB_CTL, &si);
+                if (px < 0) px = 0;
+                if (px > si.nMax) px = static_cast<float>(si.nMax);
+                m_hScrollPos = px;
+                si.fMask = SIF_POS;
+                si.nPos = static_cast<int>(px);
+                SetScrollInfo(m_hHScroll, SB_CTL, &si, TRUE);
+                InvalidateEditor();
+            }
+            return 0;
+        }
         int steps = -delta / WHEEL_DELTA;
         long newLine = static_cast<long>(m_scrollLine) + steps * 3;
         if (newLine < 0)
             newLine = 0;
-        DWORD total = static_cast<DWORD>(m_lineIndex.GetLineCount());
-        if (total > 0 && static_cast<DWORD>(newLine) >= total)
-            newLine = total - 1;
+        long maxScroll = MaxScrollLine();
+        if (newLine > maxScroll)
+            newLine = maxScroll;
         ScrollToLine(static_cast<DWORD>(newLine));
         return 0;
     }
 
     case WM_LBUTTONDOWN:
+        if (m_menuBarTempShown)
+            EndTempMenuBar();   // Alt 临时呼出状态下点击编辑区：收回菜单栏
         SetFocus(m_hwnd);
         SetCapture(m_hwnd);
         OnMouseClick(wParam, lParam, 1);
@@ -290,6 +542,45 @@ LRESULT CEditorWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             OnMouseDrag(lParam);
         return 0;
 
+    case WM_SYSKEYDOWN:
+        // Alt 按下：菜单栏隐藏时先临时挂回（后续孤立 Alt 抬起会进入菜单键盘模式）
+        if (wParam == VK_MENU && m_hideMenuBar && !m_menuBarTempShown && m_hMenu)
+        {
+            m_menuBarTempShown = true;
+            m_altOtherKey = false;
+            SetMenu(m_hwnd, m_hMenu);
+        }
+        else if (m_menuBarTempShown && wParam != VK_MENU)
+        {
+            m_altOtherKey = true;   // Alt+组合键（助记符/F4/Tab...），不是孤立 Alt
+        }
+        break;   // 继续 DefWindowProc：Alt+助记符、孤立 Alt 等默认行为
+
+    case WM_SYSKEYUP:
+        if (wParam == VK_MENU && m_menuBarTempShown)
+        {
+            // 先走默认：孤立 Alt 会在 DefWindowProc 内进入菜单栏键盘模式（模态循环），
+            // 循环退出时经 WM_MENUSELECT 关闭信号自动收回；
+            // Alt+组合键不进入菜单模式 → 返回后仍是临时显示 → 此处直接收回
+            DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (m_menuBarTempShown)
+                EndTempMenuBar();
+            return 0;
+        }
+        break;
+
+    case WM_MENUSELECT:
+        // 菜单模式退出信号（Esc/选择命令/点击菜单外）：HIWORD=0xFFFF 且无菜单句柄
+        if (m_menuBarTempShown && HIWORD(wParam) == 0xFFFF && lParam == 0)
+            EndTempMenuBar();
+        break;
+
+    case WM_ACTIVATE:
+        // Alt+Tab 切走时 Alt 的 keyup 常被系统吞掉 → 失活兜底收回
+        if (LOWORD(wParam) == WA_INACTIVE && m_menuBarTempShown)
+            EndTempMenuBar();
+        break;
+
     case WM_KEYDOWN:
         OnKeyDown(wParam);
         return 0;
@@ -298,19 +589,57 @@ LRESULT CEditorWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         OnChar(static_cast<wchar_t>(wParam));
         return 0;
 
-    case WM_IME_CHAR:
-        // 中文 IME 提交的文字经 WM_IME_CHAR 送达（宽字符 wParam）
-        OnChar(static_cast<wchar_t>(wParam));
-        return 0;
+    case WM_IME_STARTCOMPOSITION:
+    case WM_IME_COMPOSITION:
+        // 中文 IME：组合开始/进行中把组合窗口锚定到光标位置
+        UpdateImeCompositionWindow();
+        break;   // 继续交给 DefWindowProc 让默认 IME UI 正常工作
+
+    case WM_SETTINGCHANGE:
+        // 系统主题切换（跟随系统模式下生效）
+        if (m_themeMode == ThemeFollowSystem)
+            ApplyThemeToWindow();
+        break;
+
+    case WM_DRAWITEM:
+    {
+        // 状态栏分区 owner-draw（主题着色）
+        if (wParam == kStatusBarId)
+        {
+            OnDrawStatusBarPart(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+            return TRUE;
+        }
+        break;
+    }
 
     case WM_ERASEBKGND:
         return 1;   // D2D 全量绘制
 
     case WM_CLOSE:
+        // 未保存则先确认：保存 / 不保存 / 取消（保存失败视为取消，不关闭）
+        if (m_dirty)
+        {
+            const wchar_t* name = L"无标题";
+            std::wstring fileName;
+            if (!m_filePath.empty())
+            {
+                size_t p = m_filePath.find_last_of(L"\\/");
+                fileName = (p == std::wstring::npos) ? m_filePath : m_filePath.substr(p + 1);
+                name = fileName.c_str();
+            }
+            wchar_t msg[1024];
+            wsprintfW(msg, L"是否将更改保存到\r\n%s？", name);
+            int r = MessageBoxW(m_hwnd, msg, L"文本编辑器", MB_YESNOCANCEL | MB_ICONWARNING);
+            if (r == IDCANCEL)
+                return 0;
+            if (r == IDYES && !SaveDocument())
+                return 0;   // 保存失败或用户在另存为对话框取消 → 不关闭
+        }
         Destroy();
         return 0;
 
     case WM_DESTROY:
+        SaveSettings();   // 退出前记录窗口位置/大小（其余设置本就即时保存）
         PostQuitMessage(0);
         return 0;
     }
@@ -343,24 +672,7 @@ void CEditorWindow::OnCommand(WORD commandId)
         break;
     }
     case kSaveId:
-        if (m_filePath.empty())
-        {
-            // 无路径 → 走另存为
-            wchar_t path[MAX_PATH * 4] = { 0 };
-            OPENFILENAMEW ofn{};
-            ofn.lStructSize = sizeof(ofn);
-            ofn.hwndOwner = m_hwnd;
-            ofn.lpstrFilter = L"所有文件(*.*)\0*.*\0文本文件(*.txt)\0*.txt\0";
-            ofn.lpstrFile = path;
-            ofn.nMaxFile = MAX_PATH * 4;
-            ofn.Flags = OFN_PATHMUSTEXIST;
-            if (GetSaveFileNameW(&ofn))
-                SaveFile(path);
-        }
-        else
-        {
-            SaveFile(m_filePath.c_str());
-        }
+        SaveDocument();
         break;
 
     case kSaveAsId:
@@ -378,7 +690,8 @@ void CEditorWindow::OnCommand(WORD commandId)
         break;
     }
     case kExitId:
-        Destroy();
+        // 与标题栏关闭走同一分支，未保存时统一弹确认
+        SendMessageW(m_hwnd, WM_CLOSE, 0, 0);
         break;
 
     case kUndoId:
@@ -404,21 +717,365 @@ void CEditorWindow::OnCommand(WORD commandId)
         if (checked)
         {
             m_hStatusBar = CreateStatusWindowW(WS_CHILD | WS_VISIBLE, L"就绪", m_hwnd, kStatusBarId);
-            int parts[3] = { 260, 520, -1 };
-            SendMessageW(m_hStatusBar, SB_SETPARTS, 3, reinterpret_cast<LPARAM>(parts));
+            UpdateStatusBarParts();
+            ApplyMenuTheme(IsDarkTheme());
+            SetWindowTheme(m_hStatusBar, IsDarkTheme() ? L"DarkMode_Explorer" : L"Explorer", nullptr);
         }
         else
         {
             DestroyWindow(m_hStatusBar);
             m_hStatusBar = nullptr;
         }
+        m_showStatusBar = checked;
+        SaveSettings();
         OnResize();
         UpdateStatusBar();
         break;
     }
+
+    case kLineNumbersId:
+        m_showLineNumbers = !m_showLineNumbers;
+        SyncMenuChecks();
+        ApplyRendererOptions();
+        SaveSettings();
+        break;
+
+    case kWordWrapId:
+        m_wordWrap = !m_wordWrap;
+        SyncMenuChecks();
+        ApplyRendererOptions();
+        SaveSettings();
+        break;
+
+    case kHideMenuBarId:
+        m_hideMenuBar = !m_hideMenuBar;
+        if (!m_hideMenuBar)
+            m_menuBarTempShown = false;   // 恢复常驻显示
+        ApplyMenuBarState();
+        SyncMenuChecks();
+        SaveSettings();
+        break;
+
+    case kFontSizeUpId:    ChangeFontSize(+1.0f); break;
+    case kFontSizeDownId:  ChangeFontSize(-1.0f); break;
+    case kFontSizeResetId: ChangeFontSize(0.0f);  break;
+
+    case kPaddingNoneId:   m_pad = { 0, 0, 0, 0 };       SyncMenuChecks(); ApplyRendererOptions(); SaveSettings(); break;
+    case kPaddingSmallId:  m_pad = { 4, 4, 4, 4 };       SyncMenuChecks(); ApplyRendererOptions(); SaveSettings(); break;
+    case kPaddingMediumId: m_pad = { 8, 8, 8, 8 };       SyncMenuChecks(); ApplyRendererOptions(); SaveSettings(); break;
+    case kPaddingLargeId:  m_pad = { 16, 16, 16, 16 };   SyncMenuChecks(); ApplyRendererOptions(); SaveSettings(); break;
+
+    case kLineHeight10Id: m_lineHeightFactor = 1.0f; SyncMenuChecks(); ApplyRendererOptions(); SaveSettings(); break;
+    case kLineHeight12Id: m_lineHeightFactor = 1.2f; SyncMenuChecks(); ApplyRendererOptions(); SaveSettings(); break;
+    case kLineHeight15Id: m_lineHeightFactor = 1.5f; SyncMenuChecks(); ApplyRendererOptions(); SaveSettings(); break;
+    case kLineHeight20Id: m_lineHeightFactor = 2.0f; SyncMenuChecks(); ApplyRendererOptions(); SaveSettings(); break;
+
+    case kFontPrimaryId:
+        PickFont(true);
+        break;
+    case kFontSecondaryId:
+        PickFont(false);
+        break;
+
+    case kThemeSystemId: m_themeMode = ThemeFollowSystem; SyncMenuChecks(); ApplyThemeToWindow(); SaveSettings(); break;
+    case kThemeLightId:  m_themeMode = ThemeLight;        SyncMenuChecks(); ApplyThemeToWindow(); SaveSettings(); break;
+    case kThemeDarkId:   m_themeMode = ThemeDark;         SyncMenuChecks(); ApplyThemeToWindow(); SaveSettings(); break;
+
+    case kAboutId:
+        MessageBoxW(m_hwnd,
+            L"文本编辑器 1.0\n\n"
+            L"Win32 + Direct2D/DirectWrite 实现，支持超大文件打开与编辑\n"
+            L"（内存映射只读 + 分片表编辑模型 + 稀疏行索引）。\n\n"
+            L"快捷键：\n"
+            L"  Ctrl+N/O/S/Shift+S   新建/打开/保存/另存为\n"
+            L"  Ctrl+Z/Y             撤销/重做\n"
+            L"  Ctrl+C/V/A           复制/粘贴/全选\n"
+            L"  Ctrl+=/-/0、滚轮     字号增大/减小/重置（Ctrl+滚轮缩放）\n"
+            L"  Alt                  菜单栏隐藏时临时呼出",
+            L"关于文本编辑器", MB_OK);
+        break;
+
     default:
         break;
     }
+}
+
+// ---------------- 设置项应用 ----------------
+
+void CEditorWindow::LoadSettings()
+{
+    std::wstring ini = SettingsFilePath();
+    if (ini.empty())
+        return;
+
+    m_showLineNumbers = GetPrivateProfileIntW(L"View", L"ShowLineNumbers", 0, ini.c_str()) != 0;
+    m_wordWrap        = GetPrivateProfileIntW(L"View", L"WordWrap", 1, ini.c_str()) != 0;
+    m_showStatusBar   = GetPrivateProfileIntW(L"View", L"StatusBar", 1, ini.c_str()) != 0;
+    m_hideMenuBar     = GetPrivateProfileIntW(L"View", L"HideMenuBar", 0, ini.c_str()) != 0;
+
+    int theme = GetPrivateProfileIntW(L"Appearance", L"ThemeMode", ThemeFollowSystem, ini.c_str());
+    m_themeMode = (theme >= 0 && theme <= 2) ? theme : ThemeFollowSystem;
+
+    int lh = GetPrivateProfileIntW(L"Appearance", L"LineHeightX100", 120, ini.c_str());
+    m_lineHeightFactor = lh / 100.0f;
+    if (m_lineHeightFactor < 0.8f)  m_lineHeightFactor = 0.8f;
+    if (m_lineHeightFactor > 4.0f)  m_lineHeightFactor = 4.0f;
+
+    int pad = GetPrivateProfileIntW(L"Appearance", L"Padding", 8, ini.c_str());
+    if (pad < 0)  pad = 0;
+    if (pad > 64) pad = 64;
+    m_pad = { pad, pad, pad, pad };
+
+    wchar_t buf[260]{};
+    GetPrivateProfileStringW(L"Fonts", L"Primary", L"Consolas", buf, 260, ini.c_str());
+    m_fontPrimary = buf;
+    GetPrivateProfileStringW(L"Fonts", L"Secondary", L"微软雅黑", buf, 260, ini.c_str());
+    m_fontSecondary = buf;
+
+    int fs = GetPrivateProfileIntW(L"Fonts", L"FontSize", 14, ini.c_str());
+    if (fs < 8)  fs = 8;
+    if (fs > 72) fs = 72;
+    m_fontSize = static_cast<float>(fs);
+}
+
+void CEditorWindow::SaveSettings()
+{
+    std::wstring ini = SettingsFilePath();
+    if (ini.empty())
+        return;
+
+    auto writeInt = [&](LPCWSTR section, LPCWSTR key, int value) {
+        wchar_t b[16];
+        wsprintfW(b, L"%d", value);
+        WritePrivateProfileStringW(section, key, b, ini.c_str());
+    };
+
+    writeInt(L"View", L"ShowLineNumbers", m_showLineNumbers ? 1 : 0);
+    writeInt(L"View", L"WordWrap", m_wordWrap ? 1 : 0);
+    writeInt(L"View", L"StatusBar", m_hStatusBar ? 1 : 0);
+    writeInt(L"View", L"HideMenuBar", m_hideMenuBar ? 1 : 0);
+    writeInt(L"Appearance", L"ThemeMode", m_themeMode);
+    writeInt(L"Appearance", L"LineHeightX100",
+             static_cast<int>(m_lineHeightFactor * 100.0f + 0.5f));
+    writeInt(L"Appearance", L"Padding", m_pad.left);
+    WritePrivateProfileStringW(L"Fonts", L"Primary", m_fontPrimary.c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Fonts", L"Secondary", m_fontSecondary.c_str(), ini.c_str());
+    writeInt(L"Fonts", L"FontSize", static_cast<int>(m_fontSize + 0.5f));
+
+    // 窗口位置/大小：取"还原态"矩形（最大化/最小化时 rcNormalPosition 仍是还原尺寸），
+    // 配合 Maximized 标记，下次启动恢复
+    WINDOWPLACEMENT wp{};
+    wp.length = sizeof(wp);
+    if (m_hwnd && GetWindowPlacement(m_hwnd, &wp))
+    {
+        writeInt(L"Window", L"X", wp.rcNormalPosition.left);
+        writeInt(L"Window", L"Y", wp.rcNormalPosition.top);
+        writeInt(L"Window", L"Width",
+                 wp.rcNormalPosition.right - wp.rcNormalPosition.left);
+        writeInt(L"Window", L"Height",
+                 wp.rcNormalPosition.bottom - wp.rcNormalPosition.top);
+        writeInt(L"Window", L"Maximized",
+                 wp.showCmd == SW_SHOWMAXIMIZED ? 1 : 0);
+    }
+}
+
+void CEditorWindow::ApplyRendererOptions()
+{
+    if (!m_renderer)
+        return;
+    m_renderer->SetFonts(m_fontPrimary, m_fontSecondary);
+    m_renderer->SetFontSize(m_fontSize);
+    m_renderer->SetLineHeightFactor(m_lineHeightFactor);
+    m_renderer->SetWordWrap(m_wordWrap);
+    DWORD total = m_lineIndex.IsValid()
+        ? static_cast<DWORD>(m_lineIndex.GetLineCount()) : 1;
+    m_renderer->SetLineNumbers(m_showLineNumbers, total);
+    if (m_wordWrap)
+    {
+        m_hScrollPos = 0.0f;
+        m_maxLineWidth = 0.0f;
+    }
+    BumpVisualEpoch();   // 字体/换行变了，视觉行数缓存全部失效
+    UpdateScrollBar();
+    InvalidateEditor();
+}
+
+bool CEditorWindow::IsDarkTheme() const
+{
+    if (m_themeMode == ThemeDark)
+        return true;
+    if (m_themeMode == ThemeLight)
+        return false;
+
+    // 跟随系统：读 AppsUseLightTheme（缺省视为浅色）
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                      0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        DWORD value = 1, size = sizeof(value), type = 0;
+        LRESULT r = RegQueryValueExW(hKey, L"AppsUseLightTheme", nullptr, &type,
+                                     reinterpret_cast<LPBYTE>(&value), &size);
+        RegCloseKey(hKey);
+        if (r == ERROR_SUCCESS && type == REG_DWORD)
+            return value == 0;
+    }
+    return false;
+}
+
+void CEditorWindow::SetDarkTitleBar(bool dark)
+{
+    if (!m_hwnd)
+        return;
+    BOOL v = dark ? TRUE : FALSE;
+    // DWMWA_USE_IMMERSIVE_DARK_MODE：Win10 20H1+ 为 20，旧版预览为 19
+    if (FAILED(DwmSetWindowAttribute(m_hwnd, 20, &v, sizeof(v))))
+        DwmSetWindowAttribute(m_hwnd, 19, &v, sizeof(v));
+}
+
+void CEditorWindow::ApplyThemeToWindow()
+{
+    bool dark = IsDarkTheme();
+    if (m_renderer)
+        m_renderer->SetTheme(dark);
+    SetDarkTitleBar(dark);
+    ApplyMenuTheme(dark);
+
+    // 状态栏 owner-draw 配色
+    if (m_statusBgBrush)
+    {
+        DeleteObject(m_statusBgBrush);
+        m_statusBgBrush = nullptr;
+    }
+    m_statusBgBrush = CreateSolidBrush(dark ? RGB(0x25, 0x25, 0x26) : RGB(0xF3, 0xF3, 0xF3));
+    m_statusFgColor = dark ? RGB(0xD4, 0xD4, 0xD4) : RGB(0, 0, 0);
+    if (m_hStatusBar)
+        InvalidateRect(m_hStatusBar, nullptr, TRUE);
+    InvalidateEditor();
+}
+
+// uxtheme 未公开序号：SetPreferredAppMode(135) + FlushMenuThemes(136)，
+// 让菜单栏/弹出菜单按应用主题渲染（Win10 1809+；不支持的系统上静默失败）
+void CEditorWindow::ApplyMenuTheme(bool dark)
+{
+    static HMODULE uxtheme = LoadLibraryW(L"uxtheme.dll");
+    if (uxtheme)
+    {
+        static auto setPref = reinterpret_cast<int(WINAPI*)(int)>(
+            GetProcAddress(uxtheme, LPCSTR(135)));
+        static auto flush = reinterpret_cast<void(WINAPI*)()>(
+            GetProcAddress(uxtheme, LPCSTR(136)));
+        if (setPref)
+            setPref(dark ? 2 /*ForceDark*/ : 3 /*ForceLight*/);
+        if (flush)
+            flush();
+    }
+    // 滚动条深色主题（失败无害）
+    SetWindowTheme(m_hwnd, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+    if (m_hStatusBar)
+        SetWindowTheme(m_hStatusBar, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+}
+
+void CEditorWindow::SyncMenuChecks()
+{
+    if (!m_hMenu)
+        return;
+
+    CheckMenuItem(m_hMenu, kStatusBarId, m_hStatusBar ? MF_CHECKED : MF_UNCHECKED);
+    CheckMenuItem(m_hMenu, kLineNumbersId, m_showLineNumbers ? MF_CHECKED : MF_UNCHECKED);
+    CheckMenuItem(m_hMenu, kWordWrapId, m_wordWrap ? MF_CHECKED : MF_UNCHECKED);
+    CheckMenuItem(m_hMenu, kHideMenuBarId, m_hideMenuBar ? MF_CHECKED : MF_UNCHECKED);
+
+    int padIdx = 2;
+    if (m_pad.left == 0) padIdx = 0;
+    else if (m_pad.left <= 4) padIdx = 1;
+    else if (m_pad.left >= 16) padIdx = 3;
+    CheckMenuRadioItem(m_hMenu, kPaddingNoneId, kPaddingLargeId, padIdx, MF_BYCOMMAND);
+
+    int lhIdx = 1;
+    if (m_lineHeightFactor < 1.1f) lhIdx = 0;
+    else if (m_lineHeightFactor < 1.35f) lhIdx = 1;
+    else if (m_lineHeightFactor < 1.75f) lhIdx = 2;
+    else lhIdx = 3;
+    CheckMenuRadioItem(m_hMenu, kLineHeight10Id, kLineHeight20Id, lhIdx, MF_BYCOMMAND);
+
+    CheckMenuRadioItem(m_hMenu, kThemeSystemId, kThemeDarkId, m_themeMode, MF_BYCOMMAND);
+}
+
+void CEditorWindow::PickFont(bool primary)
+{
+    LOGFONTW lf{};
+    lf.lfHeight = -20;
+    lf.lfWeight = FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    wcsncpy_s(lf.lfFaceName, LF_FACESIZE,
+              (primary ? m_fontPrimary : m_fontSecondary).c_str(), _TRUNCATE);
+
+    CHOOSEFONTW cf{};
+    cf.lStructSize = sizeof(cf);
+    cf.hwndOwner = m_hwnd;
+    cf.lpLogFont = &lf;
+    cf.Flags = CF_INITTOLOGFONTSTRUCT | CF_SCREENFONTS;
+    if (ChooseFontW(&cf) && lf.lfFaceName[0])
+    {
+        if (primary)
+            m_fontPrimary = lf.lfFaceName;
+        else
+            m_fontSecondary = lf.lfFaceName;
+        UpdateFontMenuLabels();
+        ApplyRendererOptions();
+        SaveSettings();
+    }
+}
+
+void CEditorWindow::UpdateFontMenuLabels()
+{
+    if (!m_hMenu)
+        return;
+    std::wstring p = L"主字体(&P)：" + m_fontPrimary;
+    std::wstring s = L"次要字体(&S)：" + m_fontSecondary;
+    ModifyMenuW(m_hMenu, kFontPrimaryId, MF_BYCOMMAND | MF_STRING, kFontPrimaryId, p.c_str());
+    ModifyMenuW(m_hMenu, kFontSecondaryId, MF_BYCOMMAND | MF_STRING, kFontSecondaryId, s.c_str());
+    wchar_t z[48];
+    wsprintfW(z, L"重置字号(&R)\tCtrl+0（当前 %dpt）", static_cast<int>(m_fontSize + 0.5f));
+    ModifyMenuW(m_hMenu, kFontSizeResetId, MF_BYCOMMAND | MF_STRING, kFontSizeResetId, z);
+}
+
+// ---------------- 菜单栏显隐 / 字号 ----------------
+
+void CEditorWindow::ApplyMenuBarState()
+{
+    if (!m_hwnd || !m_hMenu)
+        return;
+    if (m_hideMenuBar && !m_menuBarTempShown)
+        SetMenu(m_hwnd, nullptr);
+    else
+        SetMenu(m_hwnd, m_hMenu);
+}
+
+void CEditorWindow::EndTempMenuBar()
+{
+    if (!m_menuBarTempShown)
+        return;
+    m_menuBarTempShown = false;
+    if (m_hideMenuBar)
+        SetMenu(m_hwnd, nullptr);
+}
+
+void CEditorWindow::ChangeFontSize(float delta)
+{
+    float size = (delta == 0.0f) ? 14.0f : m_fontSize + delta;
+    if (size < 8.0f)
+        size = 8.0f;
+    if (size > 72.0f)
+        size = 72.0f;
+    if (size == m_fontSize)
+        return;
+    m_fontSize = size;
+    UpdateFontMenuLabels();
+    ApplyRendererOptions();
+    EnsureCaretVisible(false);   // 行高变化后保持光标可见
+    SaveSettings();
 }
 
 // ---------------- 文件打开 / 保存 ----------------
@@ -459,6 +1116,17 @@ void CEditorWindow::RebuildDocument()
             },
             0, m_encoding);
     }
+
+    // 行号栏宽随总行数变化；水平滚动状态复位
+    if (m_renderer)
+    {
+        DWORD total = m_lineIndex.IsValid()
+            ? static_cast<DWORD>(m_lineIndex.GetLineCount()) : 1;
+        m_renderer->SetLineNumbers(m_showLineNumbers, total);
+    }
+    m_maxLineWidth = 0.0f;
+    m_hScrollPos = 0.0f;
+    BumpVisualEpoch();
 }
 
 BOOL CEditorWindow::OpenFile(LPCWSTR szPath)
@@ -468,8 +1136,9 @@ BOOL CEditorWindow::OpenFile(LPCWSTR szPath)
     {
         m_buffer.reset();
         m_filePath.clear();
-        m_dirty = false;
         RebuildDocument();
+        m_savedUndoDepth = m_piece.HistoryPosition();
+        m_dirty = false;
         m_scrollLine = 0;
         m_caretRow = 0;
         m_caretCol = 0;
@@ -492,8 +1161,9 @@ BOOL CEditorWindow::OpenFile(LPCWSTR szPath)
 
     m_buffer = std::move(buf);
     m_filePath = szPath;
-    m_dirty = false;
     RebuildDocument();
+    m_savedUndoDepth = m_piece.HistoryPosition();
+    m_dirty = false;
 
     m_scrollLine = 0;
     m_caretRow = 0;
@@ -517,7 +1187,52 @@ BOOL CEditorWindow::SaveFile(LPCWSTR szPath)
     if (!content.empty())
         m_piece.CopyOut(content.data(), content.size());
 
-    // 写临时文件后原子替换
+    const bool targetIsOpen = m_buffer && m_filePath == szPath;
+
+    // 目标正是当前已映射打开的文件：Windows 禁止对有活动映射的文件截断/替换
+    // （ERROR_THE_MAPPING / 共享冲突），所以先解除映射，直写后再重新映射。
+    // 文件本身以 FILE_SHARE_WRITE 打开，直写无需替换。
+    if (targetIsOpen)
+    {
+        m_buffer->CloseFile();
+
+        HANDLE hFile = CreateFileW(szPath, GENERIC_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE)
+        {
+            MessageBoxW(m_hwnd, L"无法写入文件（权限或占用）", L"错误", MB_OK | MB_ICONERROR);
+            return FALSE;
+        }
+        DWORD written = 0;
+        BOOL ok = content.empty() ||
+            WriteFile(hFile, content.data(), static_cast<DWORD>(content.size()), &written, nullptr);
+        if (ok)
+            ok = FlushFileBuffers(hFile);
+        CloseHandle(hFile);
+        if (!ok || written != content.size())
+        {
+            MessageBoxW(m_hwnd, L"写入文件失败", L"错误", MB_OK | MB_ICONERROR);
+            return FALSE;
+        }
+
+        // 重新映射并重建（PieceTable 基址随映射更换，SetOriginal 同步清空
+        // pieces/撤销栈；文件内容刚被保存，重建后的状态与当前一致）
+        if (!m_buffer->OpenFile(szPath))
+        {
+            MessageBoxW(m_hwnd, L"保存成功，但重新读取文件失败", L"警告", MB_OK | MB_ICONWARNING);
+        }
+        RebuildDocument();
+
+        m_savedUndoDepth = m_piece.HistoryPosition();
+        m_dirty = false;
+        m_filePath = szPath;
+        UpdateTitle();
+        UpdateStatusBar();
+        return TRUE;
+    }
+
+    // 目标不是当前打开的文件：写临时文件后原子替换
     std::wstring tmpPath = szPath;
     tmpPath += L".tmp";
 
@@ -547,10 +1262,11 @@ BOOL CEditorWindow::SaveFile(LPCWSTR szPath)
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     {
         DeleteFileW(tmpPath.c_str());
-        MessageBoxW(m_hwnd, L"替换文件失败", L"错误", MB_OK | MB_ICONERROR);
+        MessageBoxW(m_hwnd, L"替换文件失败（文件可能被其他程序独占）", L"错误", MB_OK | MB_ICONERROR);
         return FALSE;
     }
 
+    m_savedUndoDepth = m_piece.HistoryPosition();
     m_dirty = false;
     m_filePath = szPath;
     UpdateTitle();
@@ -560,14 +1276,62 @@ BOOL CEditorWindow::SaveFile(LPCWSTR szPath)
 
 // ---------------- 标题 / 状态栏 ----------------
 
+void CEditorWindow::SyncDirtyFlag()
+{
+    // 内容是否偏离"保存时的历史位置"：编辑前进、撤销后退，
+    // 回到保存点（编辑后又撤销/重做）即视为已保存状态
+    bool dirty = m_piece.HistoryPosition() != m_savedUndoDepth;
+    if (dirty != m_dirty)
+    {
+        m_dirty = dirty;
+        UpdateTitle();
+        UpdateStatusBar();
+    }
+}
+
+bool CEditorWindow::SaveDocument()
+{
+    if (m_filePath.empty())
+    {
+        // 无路径 → 走另存为（用户取消则视为保存失败，调用方据此中止关闭）
+        wchar_t path[MAX_PATH * 4] = { 0 };
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = m_hwnd;
+        ofn.lpstrFilter = L"所有文件(*.*)\0*.*\0文本文件(*.txt)\0*.txt\0";
+        ofn.lpstrFile = path;
+        ofn.nMaxFile = MAX_PATH * 4;
+        ofn.Flags = OFN_PATHMUSTEXIST;
+        if (!GetSaveFileNameW(&ofn))
+            return false;
+        return SaveFile(path) != FALSE;
+    }
+    return SaveFile(m_filePath.c_str()) != FALSE;
+}
+
 void CEditorWindow::UpdateTitle()
 {
-    std::wstring title = m_filePath.empty()
-        ? kWindowTitle
-        : (m_filePath + L" - 文本编辑器");
-    if (m_dirty)
-        title.insert(0, L"* ");
+    // 标题栏只显示文件名；完整路径在状态栏
+    std::wstring name = L"无标题";
+    if (!m_filePath.empty())
+    {
+        size_t p = m_filePath.find_last_of(L"\\/");
+        name = (p == std::wstring::npos) ? m_filePath : m_filePath.substr(p + 1);
+    }
+    std::wstring title = (m_dirty ? L"* " : L"") + name;
     SetWindowTextW(m_hwnd, title.c_str());
+}
+
+void CEditorWindow::UpdateStatusBarParts()
+{
+    if (!m_hStatusBar || !m_hwnd)
+        return;
+    RECT rc = EditorRect();
+    int w = rc.right - rc.left;
+    if (w < 100)
+        w = 100;
+    int parts[4] = { w * 45 / 100, w * 70 / 100, w * 85 / 100, -1 };
+    SendMessageW(m_hStatusBar, SB_SETPARTS, 4, reinterpret_cast<LPARAM>(parts));
 }
 
 void CEditorWindow::UpdateStatusBar()
@@ -575,33 +1339,61 @@ void CEditorWindow::UpdateStatusBar()
     if (!m_hStatusBar)
         return;
 
+    // 第 0 格固定显示文件完整路径（需求 8）
+    m_statusText[0] = m_filePath.empty() ? std::wstring(L"（未命名）") : m_filePath;
+
     if (!m_lineIndex.IsValid())
     {
-        SendMessageW(m_hStatusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(L"就绪"));
-        SendMessageW(m_hStatusBar, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(L""));
-        SendMessageW(m_hStatusBar, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(L""));
-        return;
+        m_statusText[1] = L"就绪";
+        m_statusText[2].clear();
+        m_statusText[3].clear();
+    }
+    else
+    {
+        std::wstringstream pos;
+        pos << L"行 " << (m_caretRow + 1) << L", 列 " << (m_caretCol + 1)
+            << L" | 总行 " << m_lineIndex.GetLineCount()
+            << (m_dirty ? L" | 已修改" : L"");
+        m_statusText[1] = pos.str();
+        m_statusText[2] = EncodingName(m_encoding);
+        m_statusText[3] = FormatSize(static_cast<LONGLONG>(m_piece.Size()));
     }
 
-    std::wstringstream pos;
-    pos << L"行 " << (m_caretRow + 1) << L", 列 " << (m_caretCol + 1)
-        << L" | 总行 " << m_lineIndex.GetLineCount()
-        << (m_dirty ? L" | 已修改" : L"");
+    // 各分区 owner-draw（WM_DRAWITEM 按主题着色）
+    for (int i = 0; i < 4; ++i)
+    {
+        SendMessageW(m_hStatusBar, SB_SETTEXTW, i | SBT_OWNERDRAW,
+                     reinterpret_cast<LPARAM>(m_statusText[i].c_str()));
+    }
+}
 
-    std::wstring encodingText = EncodingName(m_encoding);
-    std::wstring sizeText = FormatSize(static_cast<LONGLONG>(m_piece.Size()));
+void CEditorWindow::OnDrawStatusBarPart(DRAWITEMSTRUCT* dis)
+{
+    if (!dis || dis->itemID >= 4)
+        return;
 
-    SendMessageW(m_hStatusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(pos.str().c_str()));
-    SendMessageW(m_hStatusBar, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(encodingText.c_str()));
-    SendMessageW(m_hStatusBar, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(sizeText.c_str()));
+    HDC hdc = dis->hDC;
+    FillRect(hdc, &dis->rcItem, m_statusBgBrush ? m_statusBgBrush
+                                                : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, m_statusFgColor);
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(m_hStatusBar, WM_GETFONT, 0, 0));
+    HGDIOBJ old = SelectObject(hdc, font ? font : GetStockObject(DEFAULT_GUI_FONT));
+    RECT rc = dis->rcItem;
+    rc.left += 6;
+    DrawTextW(hdc, m_statusText[dis->itemID].c_str(), -1, &rc,
+              DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+    SelectObject(hdc, old);
 }
 
 void CEditorWindow::OnResize()
 {
     if (m_hStatusBar)
         SendMessageW(m_hStatusBar, WM_SIZE, 0, 0);
+    UpdateStatusBarParts();
     if (m_renderer)
         m_renderer->Resize();
+    BumpVisualEpoch();   // 视口宽度变化 → 换行行数变化
     UpdateScrollBar();
     InvalidateEditor();
 }
@@ -610,17 +1402,33 @@ void CEditorWindow::OnCreate(HWND hwnd)
 {
     m_hwnd = hwnd;
 
-    m_hStatusBar = CreateStatusWindowW(WS_CHILD | WS_VISIBLE, L"就绪", hwnd, kStatusBarId);
-    if (m_hStatusBar)
+    LoadSettings();
+
+    if (m_showStatusBar)
     {
-        int parts[3] = { 260, 520, -1 };
-        SendMessageW(m_hStatusBar, SB_SETPARTS, 3, reinterpret_cast<LPARAM>(parts));
+        m_hStatusBar = CreateStatusWindowW(WS_CHILD | WS_VISIBLE, L"就绪", hwnd, kStatusBarId);
+        UpdateStatusBarParts();
     }
 
     if (m_renderer)
         m_renderer->Init(hwnd);
 
+    // 滚动条为编辑区子控件：垂直条贴右缘，水平条贴编辑区底缘，状态栏独占底行
+    m_hVScroll = CreateWindowExW(0, L"SCROLLBAR", nullptr,
+                                 WS_CHILD | WS_CLIPSIBLINGS | SBS_VERT,
+                                 0, 0, 0, 0, hwnd,
+                                 reinterpret_cast<HMENU>(kVScrollId), m_hInstance, nullptr);
+    m_hHScroll = CreateWindowExW(0, L"SCROLLBAR", nullptr,
+                                 WS_CHILD | WS_CLIPSIBLINGS | SBS_HORZ,
+                                 0, 0, 0, 0, hwnd,
+                                 reinterpret_cast<HMENU>(kHScrollId), m_hInstance, nullptr);
+
     RebuildDocument();
+    ApplyThemeToWindow();
+    SyncMenuChecks();
+    UpdateFontMenuLabels();
+    ApplyRendererOptions();   // 应用持久化的换行/行高/字体/行号等
+    ApplyMenuBarState();      // 应用持久化的"隐藏菜单栏"
     UpdateStatusBar();
     UpdateScrollBar();
 }
@@ -641,22 +1449,71 @@ int CEditorWindow::Run()
     return static_cast<int>(msg.wParam);
 }
 
-// ---------------- 渲染 / 滚动 / 光标 ----------------
+// ---------------- 布局几何 ----------------
+
+RECT CEditorWindow::EditorRect() const
+{
+    RECT rc{};
+    if (m_hwnd)
+        GetClientRect(m_hwnd, &rc);
+    if (m_hStatusBar && IsWindowVisible(m_hStatusBar))
+    {
+        // 状态栏顶边映射到客户区坐标。
+        // 注意：不要用 GetWindowRect+ScreenToClient（高 DPI 下两套坐标空间混用会把
+        // 客户区高度放大近一倍，导致滚动/光标可见性计算全部失真）
+        POINT pt{ 0, 0 };
+        MapWindowPoints(m_hStatusBar, m_hwnd, &pt, 1);
+        rc.bottom = pt.y;
+    }
+    return rc;
+}
+
+float CEditorWindow::ViewportHeight() const
+{
+    RECT rc = EditorRect();
+    float h = static_cast<float>(rc.bottom - rc.top);
+    return h > 0.0f ? h : 0.0f;
+}
+
+float CEditorWindow::TextOriginX() const
+{
+    return static_cast<float>(m_pad.left) + (m_renderer ? m_renderer->GetGutterWidth() : 0.0f);
+}
+
+float CEditorWindow::TextAreaWidth() const
+{
+    RECT rc = EditorRect();
+    float w = static_cast<float>(rc.right - rc.left) - TextOriginX()
+            - static_cast<float>(m_pad.right);
+    // 垂直滚动条覆盖编辑区右缘，排版宽度需让开它
+    if (m_lineIndex.IsValid() && m_hVScroll)
+        w -= static_cast<float>(GetSystemMetrics(SM_CXVSCROLL));
+    return w > 50.0f ? w : 50.0f;
+}
+
+int CEditorWindow::MaxScrollLine() const
+{
+    if (!m_lineIndex.IsValid())
+        return 0;
+    DWORD total = static_cast<DWORD>(m_lineIndex.GetLineCount());
+    float lineH = m_renderer ? m_renderer->GetLineHeight() : 20.0f;
+    if (lineH <= 0.0f)
+        lineH = 20.0f;
+    int vpLines = static_cast<int>(ViewportHeight() / lineH);
+    if (vpLines < 1)
+        vpLines = 1;
+    int blank = vpLines * 2 / 3;   // 文末预留约 2/3 视口高度的留白（需求 11）
+    // 总高 = 内容 + 留白；可滚动范围 = 总高 - 视口。
+    // 内容不足视口 1/3 时总高 ≤ 视口，整体不可滚动
+    long long maxScroll = static_cast<long long>(total) + blank - vpLines;
+    return maxScroll > 0 ? static_cast<int>(maxScroll) : 0;
+}
 
 void CEditorWindow::InvalidateEditor()
 {
     if (!m_hwnd)
         return;
-    RECT rc;
-    GetClientRect(m_hwnd, &rc);
-    if (m_hStatusBar && IsWindowVisible(m_hStatusBar))
-    {
-        RECT sb;
-        GetWindowRect(m_hStatusBar, &sb);
-        POINT p{ 0, 0 };
-        ScreenToClient(m_hwnd, &p);
-        rc.bottom = sb.top - p.y;
-    }
+    RECT rc = EditorRect();
     if (rc.bottom > rc.top)
         InvalidateRect(m_hwnd, &rc, FALSE);
 }
@@ -691,41 +1548,62 @@ std::wstring CEditorWindow::GetLineText(DWORD row) const
     return text;
 }
 
+// ---- 可见行缓存 ----
+
+void CEditorWindow::BumpVisualEpoch()
+{
+    ++m_visualEpoch;
+}
+
+const CEditorWindow::VisualRow& CEditorWindow::VisualRowOf(DWORD row) const
+{
+    if (m_visualEpochSeen != m_visualEpoch)
+    {
+        m_visualCache.clear();
+        m_visualEpochSeen = m_visualEpoch;
+    }
+    auto it = m_visualCache.find(row);
+    if (it != m_visualCache.end())
+        return it->second;
+
+    VisualRow vr;
+    vr.text = GetLineText(row);
+    vr.visualLines = (m_renderer && m_wordWrap)
+        ? m_renderer->GetRowVisualCount(vr.text, TextAreaWidth()) : 1;
+    return m_visualCache.emplace(row, std::move(vr)).first->second;
+}
+
+UINT CEditorWindow::RowVisualCount(DWORD row) const
+{
+    return VisualRowOf(row).visualLines;
+}
+
 void CEditorWindow::BuildVisibleRows(std::vector<CRenderer::Row>& rows) const
 {
     rows.clear();
-    if (!m_lineIndex.IsValid())
+    if (!m_lineIndex.IsValid() || !m_renderer)
         return;
 
     DWORD totalLines = static_cast<DWORD>(m_lineIndex.GetLineCount());
     if (totalLines == 0)
         return;
 
-    RECT rc;
-    GetClientRect(m_hwnd, &rc);
-    if (m_hStatusBar && IsWindowVisible(m_hStatusBar))
-    {
-        RECT sb;
-        GetWindowRect(m_hStatusBar, &sb);
-        POINT p{ 0, 0 };
-        ScreenToClient(m_hwnd, &p);
-        rc.bottom = sb.top - p.y;
-    }
+    float lineH = m_renderer->GetLineHeight();
+    float viewportH = ViewportHeight();
 
-    float lineH = m_renderer ? m_renderer->GetLineHeight() : 20.0f;
-    int visibleCount = static_cast<int>((rc.bottom - rc.top) / lineH) + 2;
-    if (visibleCount < 1)
-        visibleCount = 1;
-
-    rows.reserve(visibleCount);
-    for (int i = 0; i < visibleCount; ++i)
+    // 逐逻辑行累计换行后的视觉行高（修复自动换行内容重叠的关键）；
+    // 行文本/视觉行数走缓存（编辑/设置/尺寸变化时整代失效）
+    rows.reserve(64);
+    float y = static_cast<float>(m_pad.top);
+    for (DWORD row = m_scrollLine; row < totalLines && y < viewportH; ++row)
     {
-        DWORD row = m_scrollLine + i;
-        if (row >= totalLines)
-            break;
+        const VisualRow& vr = VisualRowOf(row);
         CRenderer::Row r;
         r.row = row;
-        r.text = GetLineText(row);
+        r.text = vr.text;
+        r.yTop = y;
+        r.visualLines = vr.visualLines;
+        y += static_cast<float>(r.visualLines) * lineH;
         rows.push_back(std::move(r));
     }
 }
@@ -741,70 +1619,114 @@ void CEditorWindow::OnPaint()
         return;
     }
 
-    RECT rc;
-    GetClientRect(m_hwnd, &rc);
-    if (m_hStatusBar && IsWindowVisible(m_hStatusBar))
-    {
-        RECT sb;
-        GetWindowRect(m_hStatusBar, &sb);
-        POINT p{ 0, 0 };
-        ScreenToClient(m_hwnd, &p);
-        rc.bottom = sb.top - p.y;
-    }
+    RECT rc = EditorRect();
 
     std::vector<CRenderer::Row> rows;
     BuildVisibleRows(rows);
 
     int lineHeight = static_cast<int>(m_renderer->GetLineHeight());
-    m_renderer->Render(rows, lineHeight, rc.right - rc.left,
+    float frameMax = 0.0f;
+    m_renderer->Render(rows, lineHeight, TextAreaWidth(),
+                       static_cast<float>(rc.bottom - rc.top),
+                       TextOriginX() - m_hScrollPos,
                        m_caretRow, m_caretCol, m_caretVisible && m_hasFocus,
-                       GetRenderSelection());
+                       GetRenderSelection(), &frameMax);
+
+    // 关闭自动换行时，用见过的最宽行撑开水平滚动范围
+    if (!m_wordWrap && frameMax > m_maxLineWidth)
+    {
+        m_maxLineWidth = frameMax;
+        UpdateScrollBar();
+    }
 
     EndPaint(m_hwnd, &ps);
 }
 
 void CEditorWindow::UpdateScrollBar()
 {
-    if (!m_hwnd || !m_lineIndex.IsValid())
-    {
-        ShowScrollBar(m_hwnd, SB_VERT, FALSE);
+    if (!m_hwnd || !m_hVScroll || !m_hHScroll)
         return;
-    }
 
-    RECT rc;
-    GetClientRect(m_hwnd, &rc);
-    if (m_hStatusBar && IsWindowVisible(m_hStatusBar))
-    {
-        RECT sb;
-        GetWindowRect(m_hStatusBar, &sb);
-        POINT p{ 0, 0 };
-        ScreenToClient(m_hwnd, &p);
-        rc.bottom = sb.top - p.y;
-    }
-
+    RECT rc = EditorRect();
     float lineH = m_renderer ? m_renderer->GetLineHeight() : 20.0f;
-    int pageLines = static_cast<int>((rc.bottom - rc.top) / lineH);
-    DWORD totalLines = static_cast<DWORD>(m_lineIndex.GetLineCount());
+    int vpLines = static_cast<int>((rc.bottom - rc.top) / lineH);
+    if (vpLines < 1)
+        vpLines = 1;
 
-    SCROLLINFO si{};
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_ALL;
-    si.nMin = 0;
-    si.nMax = totalLines > 0 ? static_cast<int>(totalLines - 1) : 0;
-    si.nPage = pageLines > 0 ? static_cast<UINT>(pageLines) : 1;
-    si.nPos = static_cast<int>(m_scrollLine);
-    SetScrollInfo(m_hwnd, SB_VERT, &si, TRUE);
+    int cxV = GetSystemMetrics(SM_CXVSCROLL);
+    int cyH = GetSystemMetrics(SM_CYHSCROLL);
+
+    // 水平滚动条：仅在关闭自动换行且内容超宽时显示
+    bool hVisible = false;
+    int maxPx = 0;
+    if (m_lineIndex.IsValid() && !m_wordWrap)
+    {
+        maxPx = static_cast<int>(m_maxLineWidth + TextOriginX()
+                                 + static_cast<float>(m_pad.right)
+                                 - static_cast<float>(rc.right - rc.left));
+        if (maxPx < 0)
+            maxPx = 0;
+        hVisible = maxPx > 0;
+    }
+
+    // 垂直滚动条：编辑区右缘（水平条显示时给其让出底行）
+    {
+        int vH = static_cast<int>(rc.bottom - rc.top) - (hVisible ? cyH : 0);
+        MoveWindow(m_hVScroll, rc.right - cxV, rc.top, cxV, vH > 0 ? vH : 0, TRUE);
+        if (m_lineIndex.IsValid())
+        {
+            ShowWindow(m_hVScroll, SW_SHOWNOACTIVATE);
+            int maxScroll = MaxScrollLine();
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_ALL;
+            si.nMin = 0;
+            si.nMax = maxScroll;
+            si.nPage = static_cast<UINT>(vpLines);
+            si.nPos = static_cast<int>(m_scrollLine) > maxScroll
+                ? maxScroll : static_cast<int>(m_scrollLine);
+            SetScrollInfo(m_hVScroll, SB_CTL, &si, TRUE);
+        }
+        else
+        {
+            ShowWindow(m_hVScroll, SW_HIDE);
+        }
+    }
+
+    // 水平滚动条：编辑区底缘（不覆盖垂直条，也不再压住状态栏）
+    if (hVisible)
+    {
+        MoveWindow(m_hHScroll, rc.left, rc.bottom - cyH,
+                   static_cast<int>(rc.right - rc.left) - cxV, cyH, TRUE);
+        ShowWindow(m_hHScroll, SW_SHOWNOACTIVATE);
+        SCROLLINFO si{};
+        si.cbSize = sizeof(si);
+        si.fMask = SIF_ALL;
+        si.nMin = 0;
+        si.nMax = maxPx;
+        int page = static_cast<int>(rc.right - rc.left) - cxV;
+        si.nPage = static_cast<UINT>(page > 0 ? page : 1);
+        si.nPos = static_cast<int>(m_hScrollPos);
+        if (si.nPos > maxPx)
+            si.nPos = maxPx;
+        if (si.nPos < 0)
+            si.nPos = 0;
+        SetScrollInfo(m_hHScroll, SB_CTL, &si, TRUE);
+    }
+    else
+    {
+        ShowWindow(m_hHScroll, SW_HIDE);
+        m_hScrollPos = 0.0f;
+    }
 }
 
 void CEditorWindow::ScrollToLine(DWORD line)
 {
     if (!m_lineIndex.IsValid())
         return;
-    DWORD totalLines = static_cast<DWORD>(m_lineIndex.GetLineCount());
-    if (totalLines == 0)
-        line = 0;
-    if (line >= totalLines)
-        line = totalLines > 0 ? totalLines - 1 : 0;
+    int maxScroll = MaxScrollLine();
+    if (static_cast<int>(line) > maxScroll)
+        line = static_cast<DWORD>(maxScroll);
 
     if (line != m_scrollLine)
     {
@@ -816,13 +1738,13 @@ void CEditorWindow::ScrollToLine(DWORD line)
 
 void CEditorWindow::OnScroll(WPARAM wParam, LPARAM)
 {
-    if (!m_lineIndex.IsValid())
+    if (!m_lineIndex.IsValid() || !m_hVScroll)
         return;
 
     SCROLLINFO si{};
     si.cbSize = sizeof(si);
     si.fMask = SIF_ALL;
-    GetScrollInfo(m_hwnd, SB_VERT, &si);
+    GetScrollInfo(m_hVScroll, SB_CTL, &si);
 
     int pos = si.nPos;
     switch (LOWORD(wParam))
@@ -842,107 +1764,240 @@ void CEditorWindow::OnScroll(WPARAM wParam, LPARAM)
     ScrollToLine(static_cast<DWORD>(pos));
 }
 
-void CEditorWindow::MoveCaretTo(int row, int col, bool extendSelection)
+void CEditorWindow::OnHScroll(WPARAM wParam, LPARAM)
 {
-    if (!m_lineIndex.IsValid())
+    if (!m_hHScroll)
         return;
-    DWORD totalLines = static_cast<DWORD>(m_lineIndex.GetLineCount());
-    if (totalLines == 0)
-        return;
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_ALL;
+    GetScrollInfo(m_hHScroll, SB_CTL, &si);
 
-    if (row < 0) row = 0;
-    if (row >= static_cast<int>(totalLines)) row = static_cast<int>(totalLines) - 1;
-    if (col < 0) col = 0;
-
-    // 非 shift 移动 → 丢弃旧锚点
-    if (!extendSelection)
+    int pos = si.nPos;
+    switch (LOWORD(wParam))
     {
-        m_selAnchorValid = false;
-        m_selAnchorRow = m_caretRow;
-        m_selAnchorCol = m_caretCol;
-    }
-    else if (!m_selAnchorValid)
-    {
-        m_selAnchorValid = true;
-        m_selAnchorRow = m_caretRow;
-        m_selAnchorCol = m_caretCol;
+    case SB_LEFT:          pos = si.nMin; break;
+    case SB_RIGHT:         pos = si.nMax; break;
+    case SB_LINELEFT:      pos -= 40; break;
+    case SB_LINERIGHT:     pos += 40; break;
+    case SB_PAGELEFT:      pos -= static_cast<int>(si.nPage); break;
+    case SB_PAGERIGHT:     pos += static_cast<int>(si.nPage); break;
+    case SB_THUMBTRACK:
+    case SB_THUMBPOSITION:
+        pos = si.nTrackPos; break;
+    default: return;
     }
 
-    m_caretRow = static_cast<DWORD>(row);
-    m_caretCol = static_cast<DWORD>(col);
-    m_selCaretRow = m_caretRow;
-    m_selCaretCol = m_caretCol;
-
-    std::wstring line = GetLineText(m_caretRow);
-    if (m_caretCol > line.size())
-        m_caretCol = static_cast<DWORD>(line.size());
-    m_selCaretCol = m_caretCol;
-
-    EnsureCaretVisible();
-    UpdateStatusBar();
+    if (pos < 0)
+        pos = 0;
+    if (pos > si.nMax)
+        pos = si.nMax;
+    m_hScrollPos = static_cast<float>(pos);
+    si.fMask = SIF_POS;
+    si.nPos = pos;
+    SetScrollInfo(m_hHScroll, SB_CTL, &si, TRUE);
     InvalidateEditor();
 }
 
-void CEditorWindow::MoveCaret(INT dRow, INT dCol, bool extendSelection)
+// ---------------- 光标可见性 / 滚动 ----------------
+
+// 从当前滚动行向下累计视觉行高，计算光标行顶部 y
+// 返回 false = 距离过远或超大行导致开销过大（调用方走快速跳转路径）
+bool CEditorWindow::VisualTopOfCaretRow(float lineH, float* yTop)
+{
+    if (!m_renderer || !m_lineIndex.IsValid())
+        return false;
+    if (m_caretRow < m_scrollLine)
+        return false;
+    if (m_caretRow - m_scrollLine > kVisualScanMaxRows)
+        return false;   // 太远：精确累计开销过大，走快速路径
+
+    float y = 0.0f;
+    int budget = kVisualScanCharBudget;
+    for (DWORD r = m_scrollLine; r < m_caretRow; ++r)
+    {
+        budget -= static_cast<int>(VisualRowOf(r).text.size());
+        if (budget < 0)
+            return false;
+        y += static_cast<float>(RowVisualCount(r)) * lineH;
+    }
+    *yTop = y;
+    return true;
+}
+
+// typingMode=true：输入（插入/删除/撤销）触发——光标块底部一旦越过 2/3 视口高度
+// 就立即最小滚动回舒适区（而非等完全滚出屏幕才大跳）
+// typingMode=false：普通移动/点击，最小滚动保证光标可见
+void CEditorWindow::EnsureCaretVisible(bool typingMode)
 {
     if (!m_lineIndex.IsValid())
         return;
 
-    if (dRow == 0 && dCol == 0)
+    float lineH = m_renderer ? m_renderer->GetLineHeight() : 20.0f;
+    float viewportH = ViewportHeight();
+    if (viewportH <= 0.0f || lineH <= 0.0f)
         return;
 
-    DWORD totalLines = static_cast<DWORD>(m_lineIndex.GetLineCount());
-    if (totalLines == 0)
+    DWORD total = static_cast<DWORD>(m_lineIndex.GetLineCount());
+    if (total == 0)
         return;
-
-    int newRow = static_cast<int>(m_caretRow) + dRow;
-    int newCol = static_cast<int>(m_caretCol);
-
-    if (dRow != 0)
+    if (m_caretRow >= total)
     {
-        // 纵向移动：列沿用旧列（向上/下尽量保持），到行尾则截断
-        if (newRow < 0) newRow = 0;
-        if (newRow >= static_cast<int>(totalLines)) newRow = static_cast<int>(totalLines) - 1;
-        m_caretRow = static_cast<DWORD>(newRow);
-        std::wstring line = GetLineText(m_caretRow);
-        if (newCol > static_cast<int>(line.size()))
-            newCol = static_cast<int>(line.size());
+        m_caretRow = total - 1;
+        DWORD len = static_cast<DWORD>(GetLineText(m_caretRow).size());
+        if (m_caretCol > len)
+            m_caretCol = len;
+        m_selCaretRow = m_caretRow;
+        m_selCaretCol = m_caretCol;
+    }
+
+    float comfortBottom = viewportH * 2.0f / 3.0f;
+    float limit = typingMode ? comfortBottom : viewportH;
+
+    int vpLines = static_cast<int>(viewportH / lineH);
+    if (vpLines < 1)
+        vpLines = 1;
+    int comfortOffset = vpLines * 2 / 3;
+
+    if (m_caretRow < m_scrollLine)
+    {
+        ScrollToLine(m_caretRow);
+        return;
+    }
+    if (m_caretRow - m_scrollLine > kVisualScanMaxRows)
+    {
+        // 光标远离视口：直接跳转
+        ScrollToLine(typingMode
+            ? ComfortScrollLineFar(lineH, viewportH)
+            : m_caretRow);
+        return;
+    }
+
+    float yTop = 0.0f;
+    if (!VisualTopOfCaretRow(lineH, &yTop))
+    {
+        ScrollToLine(typingMode
+            ? ComfortScrollLineFar(lineH, viewportH)
+            : m_caretRow);
+        return;
+    }
+
+    UINT caretLines = RowVisualCount(m_caretRow);
+    float caretH = static_cast<float>(caretLines) * lineH;
+
+    // 光标块底部仍在舒适区/视口内 → 不滚动
+    if (yTop + caretH <= limit)
+        return;
+
+    if (typingMode)
+    {
+        // 最小滚动：从光标行向上收行，直到光标块底部回到约 2/3 视口高度。
+        // 用户连续输入换行时每次只滚一行，光标始终贴着舒适区下缘（而非大跳）
+        float acc = 0.0f;
+        DWORD k = 0;
+        int budget = kVisualScanCharBudget;
+        while (k < m_caretRow - m_scrollLine && k < kVisualScanMaxRows)
+        {
+            DWORD r = m_caretRow - 1 - k;
+            budget -= static_cast<int>(VisualRowOf(r).text.size());
+            if (budget < 0)
+                break;
+            float h = static_cast<float>(RowVisualCount(r)) * lineH;
+            if (acc + h + caretH <= comfortBottom)
+            {
+                acc += h;
+                ++k;
+            }
+            else
+                break;
+        }
+        ScrollToLine(m_caretRow - k);
     }
     else
     {
-        // 横向移动：code point 级（跳过代理对）
-        std::wstring line = GetLineText(m_caretRow);
-        if (dCol > 0)
-            newCol = static_cast<int>(NextCodePointCol(line, m_caretCol));
-        else
-            newCol = static_cast<int>(PrevCodePointCol(line, m_caretCol));
+        // 最小滚动：从光标行向上收行，直到光标块底部进入视口
+        float acc = 0.0f;
+        DWORD k = 0;
+        int budget = kVisualScanCharBudget;
+        while (k < m_caretRow - m_scrollLine && k < kVisualScanMaxRows)
+        {
+            DWORD r = m_caretRow - 1 - k;
+            budget -= static_cast<int>(VisualRowOf(r).text.size());
+            if (budget < 0)
+                break;
+            float h = static_cast<float>(RowVisualCount(r)) * lineH;
+            if (acc + h + caretH <= viewportH)
+            {
+                acc += h;
+                ++k;
+            }
+            else
+                break;
+        }
+        ScrollToLine(m_caretRow - k);
     }
-
-    MoveCaretTo(newRow, newCol, extendSelection);
 }
 
-void CEditorWindow::EnsureCaretVisible()
+// 远距离快速路径：无法精确累计时按逻辑行粗略估算舒适区滚动目标
+DWORD CEditorWindow::ComfortScrollLineFar(float lineH, float viewportH)
+{
+    int vpLines = static_cast<int>(viewportH / lineH);
+    if (vpLines < 1)
+        vpLines = 1;
+    return static_cast<DWORD>(std::max(0, static_cast<int>(m_caretRow) - vpLines * 2 / 3));
+}
+
+// 计算把光标行顶部定位到视口 ratio 高度处的目标滚动行：
+// 从光标行向上按视觉高度累加，直到累计高度达到目标。exact=false 表示距离过远
+// （超出扫描上限/字符预算），调用方应退回按逻辑行的粗略估算
+DWORD CEditorWindow::ComfortScrollLine(float lineH, float viewportH, float ratio, bool* exact)
+{
+    *exact = true;
+    float target = viewportH * ratio;
+    float acc = 0.0f;
+    DWORD k = 0;
+    int budget = kVisualScanCharBudget;
+    while (k < m_caretRow && k < kVisualScanMaxRows)
+    {
+        DWORD r = m_caretRow - 1 - k;
+        budget -= static_cast<int>(VisualRowOf(r).text.size());
+        if (budget < 0)
+        {
+            *exact = false;
+            break;
+        }
+        float h = static_cast<float>(RowVisualCount(r)) * lineH;
+        if (acc + h <= target)
+        {
+            acc += h;
+            ++k;
+        }
+        else
+            break;
+    }
+    return m_caretRow - k;
+}
+
+// 需求 9/11：点击空白区跳到文末后，把光标行定位到视口约 2/3 高度处
+void CEditorWindow::ScrollCaretToComfortHeight()
 {
     if (!m_lineIndex.IsValid())
         return;
-
-    RECT rc;
-    GetClientRect(m_hwnd, &rc);
-    if (m_hStatusBar && IsWindowVisible(m_hStatusBar))
-    {
-        RECT sb;
-        GetWindowRect(m_hStatusBar, &sb);
-        POINT p{ 0, 0 };
-        ScreenToClient(m_hwnd, &p);
-        rc.bottom = sb.top - p.y;
-    }
     float lineH = m_renderer ? m_renderer->GetLineHeight() : 20.0f;
-    int visibleCount = static_cast<int>((rc.bottom - rc.top) / lineH);
+    float viewportH = ViewportHeight();
+    if (lineH <= 0.0f || viewportH <= 0.0f)
+        return;
 
-    if (m_caretRow < m_scrollLine)
-        ScrollToLine(m_caretRow);
-    else if (m_caretRow >= m_scrollLine + visibleCount)
-        ScrollToLine(m_caretRow - visibleCount + 1);
+    bool exact = false;
+    DWORD targetLine = ComfortScrollLine(lineH, viewportH, 2.0f / 3.0f, &exact);
+    if (!exact)
+    {
+        int vpLines = static_cast<int>(viewportH / lineH);
+        if (vpLines < 1)
+            vpLines = 1;
+        targetLine = static_cast<DWORD>(std::max(0, static_cast<int>(m_caretRow) - vpLines * 2 / 3));
+    }
+    ScrollToLine(targetLine);
 }
 
 void CEditorWindow::OnTimer()
@@ -1150,25 +2205,14 @@ void CEditorWindow::InsertTextAtCaret(const std::wstring& text)
 
     m_piece.Insert(ofs, reinterpret_cast<const unsigned char*>(bytes.data()),
                    static_cast<uint32_t>(bytes.size()));
-    m_dirty = true;
+    SyncDirtyFlag();
 
-    // 行结构更新：统计新增行数；纯插入不跨行则快速平移关键帧
+    // 行结构增量更新（含跨行插入）：O(关键帧数)，避免大文件全量重建造成卡顿
     int breaks = CountLineBreaks(text);
     int64_t lineDelta = breaks;
-    int64_t byteDelta = static_cast<int64_t>(bytes.size());
-    if (lineDelta > 0)
-    {
-        // 插入包含换行 → 编辑点可能位于行中间，后续行号/偏移变化较大：整帧重建更稳
-        m_lineIndex.Build(
-            [this](uint64_t o, unsigned char* d, uint64_t m) -> uint64_t {
-                return DocRead(o, d, m);
-            },
-            m_piece.Size(), m_encoding);
-    }
-    else
-    {
-        m_lineIndex.NotifyEdit(ofs, byteDelta, 0);
-    }
+    m_lineIndex.NotifyEditRange(ofs, ofs,
+                                static_cast<int64_t>(bytes.size()), lineDelta);
+    BumpVisualEpoch();
 
     // 光标移动到插入文本之后
     m_selAnchorValid = false;
@@ -1209,7 +2253,7 @@ void CEditorWindow::InsertTextAtCaret(const std::wstring& text)
     m_selCaretCol = m_caretCol;
 
     UpdateStatusBar();
-    EnsureCaretVisible();
+    EnsureCaretVisible(true);   // 输入触发的自动滚动（约 2/3 高度定位）
     InvalidateEditor();
 }
 
@@ -1233,24 +2277,16 @@ void CEditorWindow::DeleteRange(DWORD startRow, DWORD startCol, DWORD endRow, DW
     uint64_t len = endByte - startByte;
 
     m_piece.Erase(startByte, static_cast<uint32_t>(len));
-    m_dirty = true;
+    SyncDirtyFlag();
 
     // 删除跨了多少行换行
     uint64_t rowCount = static_cast<uint64_t>(endRow) - startRow;
 
-    // 无论是否跨行，统一重建关键帧以保一致（删除更复杂，直接重建）
-    if (rowCount > 0)
-    {
-        m_lineIndex.Build(
-            [this](uint64_t o, unsigned char* d, uint64_t m) -> uint64_t {
-                return DocRead(o, d, m);
-            },
-            m_piece.Size(), m_encoding);
-    }
-    else
-    {
-        m_lineIndex.NotifyEdit(startByte, -static_cast<int64_t>(len), 0);
-    }
+    // 行结构增量更新（含跨行删除）：O(关键帧数)，避免大文件全量重建造成卡顿
+    m_lineIndex.NotifyEditRange(startByte, endByte,
+                                -static_cast<int64_t>(len),
+                                -static_cast<int64_t>(rowCount));
+    BumpVisualEpoch();
 
     // 光标回到删除起点
     m_selAnchorValid = false;
@@ -1281,7 +2317,7 @@ void CEditorWindow::DeleteRange(DWORD startRow, DWORD startCol, DWORD endRow, DW
     m_selCaretCol = m_caretCol;
 
     UpdateStatusBar();
-    EnsureCaretVisible();
+    EnsureCaretVisible(true);
     InvalidateEditor();
 }
 
@@ -1324,7 +2360,7 @@ void CEditorWindow::Undo()
 {
     if (m_piece.Undo())
     {
-        m_dirty = true;
+        SyncDirtyFlag();
         // 重建行索引 + 光标置于改动前位置（用命令内偏移）
         uint64_t ofs = m_piece.UndoOffset();
         m_lineIndex.Build(
@@ -1336,8 +2372,9 @@ void CEditorWindow::Undo()
         m_selAnchorValid = false;
         m_selCaretRow = m_caretRow;
         m_selCaretCol = m_caretCol;
+        BumpVisualEpoch();
         UpdateStatusBar();
-        EnsureCaretVisible();
+        EnsureCaretVisible(true);
         InvalidateEditor();
     }
 }
@@ -1346,7 +2383,7 @@ void CEditorWindow::Redo()
 {
     if (m_piece.Redo())
     {
-        m_dirty = true;
+        SyncDirtyFlag();
         uint64_t ofs = m_piece.RedoOffset();
         m_lineIndex.Build(
             [this](uint64_t o, unsigned char* d, uint64_t m) -> uint64_t {
@@ -1357,8 +2394,9 @@ void CEditorWindow::Redo()
         m_selAnchorValid = false;
         m_selCaretRow = m_caretRow;
         m_selCaretCol = m_caretCol;
+        BumpVisualEpoch();
         UpdateStatusBar();
-        EnsureCaretVisible();
+        EnsureCaretVisible(true);
         InvalidateEditor();
     }
 }
@@ -1464,6 +2502,85 @@ void CEditorWindow::PasteFromClipboard()
 
 // ---------------- 鼠标 / 键盘 / IME ----------------
 
+// 客户区坐标 → (逻辑行, 列)。返回 false = 点击在最后一行之下的空白区
+bool CEditorWindow::HitTestClient(int x, int y, DWORD* pRow, DWORD* pCol)
+{
+    if (!m_renderer || !m_lineIndex.IsValid())
+        return false;
+
+    std::vector<CRenderer::Row> rows;
+    BuildVisibleRows(rows);
+    if (rows.empty())
+    {
+        // 文档至少 1 行；可见行为空说明当前滚动在文末留白区 → 视为"最后一行之下"
+        return false;
+    }
+
+    float textX = static_cast<float>(x) - TextOriginX() + m_hScrollPos;
+    return m_renderer->HitTestPoint(rows, static_cast<int>(m_renderer->GetLineHeight()),
+                                    TextAreaWidth(), textX, static_cast<float>(y),
+                                    pRow, pCol);
+}
+
+POINT CEditorWindow::GetCaretClientPoint()
+{
+    POINT pt{ 0, 0 };
+    if (!m_renderer || !m_lineIndex.IsValid())
+        return pt;
+
+    std::vector<CRenderer::Row> rows;
+    BuildVisibleRows(rows);
+    float lineH = m_renderer->GetLineHeight();
+
+    for (const auto& r : rows)
+    {
+        if (r.row == m_caretRow)
+        {
+            float x = 0.0f, y = 0.0f;
+            m_renderer->GetCaretPoint(r.text, m_caretCol, TextAreaWidth(), &x, &y);
+            pt.x = static_cast<int>(TextOriginX() - m_hScrollPos + x);
+            pt.y = static_cast<int>(r.yTop + y);
+            return pt;
+        }
+    }
+
+    // 光标行不在可见范围（罕见）：按逻辑行估算
+    DWORD rel = m_caretRow > m_scrollLine ? m_caretRow - m_scrollLine : 0;
+    pt.y = static_cast<int>(m_pad.top) + static_cast<int>(static_cast<float>(rel) * lineH);
+    pt.x = static_cast<int>(TextOriginX());
+    return pt;
+}
+
+bool CEditorWindow::IsImeOpen() const
+{
+    if (!m_hwnd)
+        return false;
+    HIMC himc = ImmGetContext(m_hwnd);
+    if (!himc)
+        return false;
+    BOOL open = ImmGetOpenStatus(himc);
+    ImmReleaseContext(m_hwnd, himc);
+    return open != FALSE;
+}
+
+// 需求 2：把 IME 组合窗口锚定到当前光标位置
+void CEditorWindow::UpdateImeCompositionWindow()
+{
+    if (!m_hwnd || !IsImeOpen())
+        return;
+
+    HIMC himc = ImmGetContext(m_hwnd);
+    if (!himc)
+        return;
+
+    POINT pt = GetCaretClientPoint();
+    COMPOSITIONFORM cf{};
+    cf.dwStyle = CFS_POINT;
+    cf.ptCurrentPos = pt;
+    ImmSetCompositionWindow(himc, &cf);
+    ImmReleaseContext(m_hwnd, himc);
+}
+
 void CEditorWindow::OnMouseClick(WPARAM wParam, LPARAM lParam, UINT clickCount)
 {
     if (!m_lineIndex.IsValid())
@@ -1472,33 +2589,42 @@ void CEditorWindow::OnMouseClick(WPARAM wParam, LPARAM lParam, UINT clickCount)
     int x = GET_X_LPARAM(lParam);
     int y = GET_Y_LPARAM(lParam);
 
-    RECT sb;
     if (m_hStatusBar && IsWindowVisible(m_hStatusBar))
     {
-        GetWindowRect(m_hStatusBar, &sb);
-        POINT p{ x, y };
-        ClientToScreen(m_hwnd, &p);
-        if (p.y >= sb.top)
+        POINT pt{ x, y };
+        MapWindowPoints(m_hwnd, m_hStatusBar, &pt, 1);
+        if (pt.y >= 0)
             return;   // 状态栏
     }
 
-    RECT rc;
-    GetClientRect(m_hwnd, &rc);
-    int clientWidth = rc.right - rc.left;
-
-    std::vector<CRenderer::Row> rows;
-    BuildVisibleRows(rows);
-    if (rows.empty())
-        return;
-
-    int lineHeight = static_cast<int>(m_renderer->GetLineHeight());
     DWORD row = 0, col = 0;
-    if (!m_renderer->HitTestPoint(rows, lineHeight, clientWidth,
-                                  static_cast<float>(x), static_cast<float>(y),
-                                  &row, &col))
-        return;
-
+    bool inText = HitTestClient(x, y, &row, &col);
     bool shift = (wParam & MK_SHIFT) != 0;
+
+    if (!inText)
+    {
+        // 需求 9：点击最后一行之下的空白区 → 光标跳到文末
+        // 需求 11：跳转后把光标定位到视口约 2/3 高度处（而非底部）
+        DWORD total = static_cast<DWORD>(m_lineIndex.GetLineCount());
+        if (total == 0)
+            return;
+        row = total - 1;
+        col = static_cast<DWORD>(GetLineText(row).size());
+
+        m_caretRow = row;
+        m_caretCol = col;
+        m_selAnchorValid = true;
+        m_selAnchorRow = row;
+        m_selAnchorCol = col;
+        m_selCaretRow = row;
+        m_selCaretCol = col;
+
+        UpdateStatusBar();
+        ScrollCaretToComfortHeight();
+        UpdateImeCompositionWindow();
+        InvalidateEditor();
+        return;
+    }
 
     if (clickCount >= 3)
     {
@@ -1538,8 +2664,9 @@ void CEditorWindow::OnMouseClick(WPARAM wParam, LPARAM lParam, UINT clickCount)
         m_selCaretCol = col;
     }
 
-    EnsureCaretVisible();
+    EnsureCaretVisible(false);
     UpdateStatusBar();
+    UpdateImeCompositionWindow();
     InvalidateEditor();
 }
 
@@ -1551,31 +2678,22 @@ void CEditorWindow::OnMouseDrag(LPARAM lParam)
     int x = GET_X_LPARAM(lParam);
     int y = GET_Y_LPARAM(lParam);
 
-    RECT sb;
     if (m_hStatusBar && IsWindowVisible(m_hStatusBar))
     {
-        GetWindowRect(m_hStatusBar, &sb);
-        POINT p{ x, y };
-        ClientToScreen(m_hwnd, &p);
-        if (p.y >= sb.top)
+        POINT pt{ x, y };
+        MapWindowPoints(m_hwnd, m_hStatusBar, &pt, 1);
+        if (pt.y >= 0)
             return;
     }
 
-    RECT rc;
-    GetClientRect(m_hwnd, &rc);
-    int clientWidth = rc.right - rc.left;
-
-    std::vector<CRenderer::Row> rows;
-    BuildVisibleRows(rows);
-    if (rows.empty())
-        return;
-
-    int lineHeight = static_cast<int>(m_renderer->GetLineHeight());
     DWORD row = 0, col = 0;
-    if (!m_renderer->HitTestPoint(rows, lineHeight, clientWidth,
-                                  static_cast<float>(x), static_cast<float>(y),
-                                  &row, &col))
-        return;
+    if (!HitTestClient(x, y, &row, &col))
+    {
+        // 拖出最后一行之下 → 吸附到文末
+        DWORD total = static_cast<DWORD>(m_lineIndex.GetLineCount());
+        row = total > 0 ? total - 1 : 0;
+        col = static_cast<DWORD>(GetLineText(row).size());
+    }
 
     if (!m_selAnchorValid)
     {
@@ -1590,8 +2708,7 @@ void CEditorWindow::OnMouseDrag(LPARAM lParam)
 
     // 拖到视口边缘自动滚动
     int scrollMargin = 8;
-    RECT cr;
-    GetClientRect(m_hwnd, &cr);
+    RECT cr = EditorRect();
     if (y < scrollMargin && m_scrollLine > 0)
         ScrollToLine(m_scrollLine - 1);
     else if (y > cr.bottom - scrollMargin)
@@ -1599,6 +2716,86 @@ void CEditorWindow::OnMouseDrag(LPARAM lParam)
 
     UpdateStatusBar();
     InvalidateEditor();
+}
+
+void CEditorWindow::MoveCaretTo(int row, int col, bool extendSelection)
+{
+    if (!m_lineIndex.IsValid())
+        return;
+    DWORD totalLines = static_cast<DWORD>(m_lineIndex.GetLineCount());
+    if (totalLines == 0)
+        return;
+
+    if (row < 0) row = 0;
+    if (row >= static_cast<int>(totalLines)) row = static_cast<int>(totalLines) - 1;
+    if (col < 0) col = 0;
+
+    // 非 shift 移动 → 丢弃旧锚点
+    if (!extendSelection)
+    {
+        m_selAnchorValid = false;
+        m_selAnchorRow = m_caretRow;
+        m_selAnchorCol = m_caretCol;
+    }
+    else if (!m_selAnchorValid)
+    {
+        m_selAnchorValid = true;
+        m_selAnchorRow = m_caretRow;
+        m_selAnchorCol = m_caretCol;
+    }
+
+    m_caretRow = static_cast<DWORD>(row);
+    m_caretCol = static_cast<DWORD>(col);
+    m_selCaretRow = m_caretRow;
+    m_selCaretCol = m_caretCol;
+
+    std::wstring line = GetLineText(m_caretRow);
+    if (m_caretCol > line.size())
+        m_caretCol = static_cast<DWORD>(line.size());
+    m_selCaretCol = m_caretCol;
+
+    EnsureCaretVisible(false);
+    UpdateStatusBar();
+    UpdateImeCompositionWindow();
+    InvalidateEditor();
+}
+
+void CEditorWindow::MoveCaret(INT dRow, INT dCol, bool extendSelection)
+{
+    if (!m_lineIndex.IsValid())
+        return;
+
+    if (dRow == 0 && dCol == 0)
+        return;
+
+    DWORD totalLines = static_cast<DWORD>(m_lineIndex.GetLineCount());
+    if (totalLines == 0)
+        return;
+
+    int newRow = static_cast<int>(m_caretRow) + dRow;
+    int newCol = static_cast<int>(m_caretCol);
+
+    if (dRow != 0)
+    {
+        // 纵向移动：列沿用旧列（向上/下尽量保持），到行尾则截断
+        if (newRow < 0) newRow = 0;
+        if (newRow >= static_cast<int>(totalLines)) newRow = static_cast<int>(totalLines) - 1;
+        m_caretRow = static_cast<DWORD>(newRow);
+        std::wstring line = GetLineText(m_caretRow);
+        if (newCol > static_cast<int>(line.size()))
+            newCol = static_cast<int>(line.size());
+    }
+    else
+    {
+        // 横向移动：code point 级（跳过代理对）
+        std::wstring line = GetLineText(m_caretRow);
+        if (dCol > 0)
+            newCol = static_cast<int>(NextCodePointCol(line, m_caretCol));
+        else
+            newCol = static_cast<int>(PrevCodePointCol(line, m_caretCol));
+    }
+
+    MoveCaretTo(newRow, newCol, extendSelection);
 }
 
 void CEditorWindow::OnKeyDown(WPARAM wParam)
@@ -1610,13 +2807,17 @@ void CEditorWindow::OnKeyDown(WPARAM wParam)
     {
         switch (wParam)
         {
-        case 'S': case 's': OnCommand(kSaveId); return;
+        case 'S': case 's': OnCommand(shift ? kSaveAsId : kSaveId); return;
         case 'Z': case 'z': Undo(); return;
         case 'Y': case 'y': Redo(); return;
         case 'N': case 'n': OnCommand(kNewId); return;
         case 'O': case 'o': OnCommand(kOpenId); return;
         case 'C': case 'c': CopySelection(); return;
         case 'V': case 'v': PasteFromClipboard(); return;
+        // 字号缩放（Ctrl+= / Ctrl+- / Ctrl+0，含小键盘 + -）
+        case '=': case VK_OEM_PLUS:    case VK_ADD:    ChangeFontSize(+1.0f); return;
+        case '-': case VK_OEM_MINUS:   case VK_SUBTRACT: ChangeFontSize(-1.0f); return;
+        case '0': case VK_NUMPAD0:     ChangeFontSize(0.0f);  return;
         case 'A': case 'a':
             if (m_lineIndex.IsValid())
             {

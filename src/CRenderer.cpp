@@ -10,6 +10,9 @@ namespace
                (cp >= 0x20000 && cp <= 0x2FFFF) ||  // 补充平面生僻字（保守含入无碍）
                (cp >= 0xE0000 && cp <= 0xE01EF);    // 标签/变体选择符
     }
+
+    // 均匀行距下基线约占行高的 80%（中文/西文观感均衡）
+    float BaselineRatio() { return 0.8f; }
 }
 
 CRenderer::CRenderer()
@@ -19,15 +22,27 @@ CRenderer::CRenderer()
     , m_pDWriteFactory(nullptr)
     , m_pDWriteFactory2(nullptr)
     , m_pSystemFallback(nullptr)
+    , m_pCustomFallback(nullptr)
     , m_pTextFormat(nullptr)
     , m_pEmojiFormat(nullptr)
+    , m_pGutterFormat(nullptr)
     , m_pTextBrush(nullptr)
     , m_pBackgroundBrush(nullptr)
     , m_pCaretBrush(nullptr)
     , m_pSelectionBrush(nullptr)
+    , m_pGutterBgBrush(nullptr)
+    , m_pGutterTextBrush(nullptr)
+    , m_pGutterLineBrush(nullptr)
     , m_lineHeight(20.0f)
+    , m_lineHeightFactor(1.2f)
     , m_fontFamily(L"Consolas")
+    , m_fontFallbackFamily(L"微软雅黑")
     , m_fontSize(14.0f)
+    , m_wordWrap(true)
+    , m_dark(false)
+    , m_showLineNumbers(false)
+    , m_lineNumberTotal(0)
+    , m_gutterWidth(0.0f)
 {
 }
 
@@ -49,6 +64,43 @@ void CRenderer::Destroy()
     m_hwnd = nullptr;
 }
 
+void CRenderer::CreateThemeBrushes()
+{
+    if (!m_pRT)
+        return;   // RT 重建时按当前 m_dark 创建
+
+    if (m_pTextBrush)      { m_pTextBrush->Release();      m_pTextBrush = nullptr; }
+    if (m_pBackgroundBrush){ m_pBackgroundBrush->Release(); m_pBackgroundBrush = nullptr; }
+    if (m_pCaretBrush)     { m_pCaretBrush->Release();     m_pCaretBrush = nullptr; }
+    if (m_pSelectionBrush) { m_pSelectionBrush->Release(); m_pSelectionBrush = nullptr; }
+    if (m_pGutterBgBrush)  { m_pGutterBgBrush->Release();  m_pGutterBgBrush = nullptr; }
+    if (m_pGutterTextBrush){ m_pGutterTextBrush->Release(); m_pGutterTextBrush = nullptr; }
+    if (m_pGutterLineBrush){ m_pGutterLineBrush->Release(); m_pGutterLineBrush = nullptr; }
+
+    if (m_dark)
+    {
+        // 深色（VS Code 风格配色）
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.831f, 0.831f, 0.831f), &m_pTextBrush);          // #D4D4D4
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.118f, 0.118f, 0.118f), &m_pBackgroundBrush);    // #1E1E1E
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.910f, 0.910f, 0.910f), &m_pCaretBrush);
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.18f, 0.35f, 0.55f, 0.55f), &m_pSelectionBrush);
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.145f, 0.145f, 0.149f), &m_pGutterBgBrush);      // #252526
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.522f, 0.522f, 0.522f), &m_pGutterTextBrush);    // #858585
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.247f, 0.247f, 0.275f), &m_pGutterLineBrush);    // #3F3F46
+    }
+    else
+    {
+        // 浅色
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), &m_pTextBrush);
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &m_pBackgroundBrush);
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), &m_pCaretBrush);
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.47f, 0.83f, 0.30f), &m_pSelectionBrush);
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.953f, 0.953f, 0.953f), &m_pGutterBgBrush);      // #F3F3F3
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.463f, 0.463f, 0.463f), &m_pGutterTextBrush);    // #767676
+        m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.851f, 0.851f, 0.851f), &m_pGutterLineBrush);    // #D9D9D9
+    }
+}
+
 HRESULT CRenderer::CreateDeviceResources()
 {
     HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &m_pD2DFactory);
@@ -60,7 +112,7 @@ HRESULT CRenderer::CreateDeviceResources()
     if (FAILED(hr))
         return hr;
 
-    // 尝试升级到 IDWriteFactory2 以获取系统字体回退表
+    // 尝试升级到 IDWriteFactory2 以获取系统字体回退表与自定义回退构建器
     m_pDWriteFactory->QueryInterface(__uuidof(IDWriteFactory2),
                                      reinterpret_cast<void**>(&m_pDWriteFactory2));
     if (m_pDWriteFactory2)
@@ -84,43 +136,29 @@ HRESULT CRenderer::CreateDeviceResources()
     if (FAILED(hr))
         return hr;
 
-    // 获取用户 locale，保证字体回退按用户语言查找
-    wchar_t locale[LOCALE_NAME_MAX_LENGTH] = {};
-    GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH);
+    RebuildTextFormats();
+    CreateThemeBrushes();
 
-    hr = m_pDWriteFactory->CreateTextFormat(
-        m_fontFamily.c_str(), nullptr,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-        m_fontSize, locale, &m_pTextFormat);
-    if (FAILED(hr))
-        return hr;
-
-    // Emoji 专用格式（彩色字形）
-    m_pDWriteFactory->CreateTextFormat(
-        L"Segoe UI Emoji", nullptr,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-        m_fontSize, locale, &m_pEmojiFormat);
-
-    m_pRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), &m_pTextBrush);
-    m_pRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &m_pBackgroundBrush);
-    m_pRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), &m_pCaretBrush);
-    m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.47f, 0.83f, 0.25f), &m_pSelectionBrush);
-
-    m_lineHeight = m_fontSize * 1.35f;
+    m_lineHeight = m_fontSize * m_lineHeightFactor;
 
     return S_OK;
 }
 
 void CRenderer::ReleaseTextObjects()
 {
-    if (m_pEmojiFormat)      { m_pEmojiFormat->Release(); m_pEmojiFormat = nullptr; }
-    if (m_pTextFormat)       { m_pTextFormat->Release(); m_pTextFormat = nullptr; }
-    if (m_pSystemFallback)   { m_pSystemFallback->Release(); m_pSystemFallback = nullptr; }
-    if (m_pDWriteFactory2)   { m_pDWriteFactory2->Release(); m_pDWriteFactory2 = nullptr; }
-    if (m_pCaretBrush)       { m_pCaretBrush->Release(); m_pCaretBrush = nullptr; }
-    if (m_pSelectionBrush)   { m_pSelectionBrush->Release(); m_pSelectionBrush = nullptr; }
-    if (m_pBackgroundBrush)  { m_pBackgroundBrush->Release(); m_pBackgroundBrush = nullptr; }
-    if (m_pTextBrush)        { m_pTextBrush->Release(); m_pTextBrush = nullptr; }
+    if (m_pGutterFormat)     { m_pGutterFormat->Release();     m_pGutterFormat = nullptr; }
+    if (m_pEmojiFormat)      { m_pEmojiFormat->Release();      m_pEmojiFormat = nullptr; }
+    if (m_pTextFormat)       { m_pTextFormat->Release();       m_pTextFormat = nullptr; }
+    if (m_pCustomFallback)   { m_pCustomFallback->Release();   m_pCustomFallback = nullptr; }
+    if (m_pSystemFallback)   { m_pSystemFallback->Release();   m_pSystemFallback = nullptr; }
+    if (m_pDWriteFactory2)   { m_pDWriteFactory2->Release();   m_pDWriteFactory2 = nullptr; }
+    if (m_pCaretBrush)       { m_pCaretBrush->Release();       m_pCaretBrush = nullptr; }
+    if (m_pSelectionBrush)   { m_pSelectionBrush->Release();   m_pSelectionBrush = nullptr; }
+    if (m_pGutterBgBrush)    { m_pGutterBgBrush->Release();    m_pGutterBgBrush = nullptr; }
+    if (m_pGutterTextBrush)  { m_pGutterTextBrush->Release();  m_pGutterTextBrush = nullptr; }
+    if (m_pGutterLineBrush)  { m_pGutterLineBrush->Release();  m_pGutterLineBrush = nullptr; }
+    if (m_pBackgroundBrush)  { m_pBackgroundBrush->Release();  m_pBackgroundBrush = nullptr; }
+    if (m_pTextBrush)        { m_pTextBrush->Release();        m_pTextBrush = nullptr; }
 }
 
 void CRenderer::ReleaseDeviceResources()
@@ -155,27 +193,185 @@ float CRenderer::GetLineHeight() const
     return m_lineHeight;
 }
 
+void CRenderer::SetWordWrap(bool wrap)
+{
+    m_wordWrap = wrap;
+}
+
+void CRenderer::SetLineHeightFactor(float factor)
+{
+    if (factor < 0.8f)
+        factor = 0.8f;
+    if (factor > 4.0f)
+        factor = 4.0f;
+    m_lineHeightFactor = factor;
+    m_lineHeight = m_fontSize * m_lineHeightFactor;
+}
+
+void CRenderer::SetFontSize(float size)
+{
+    if (size < 8.0f)
+        size = 8.0f;
+    if (size > 72.0f)
+        size = 72.0f;
+    if (size == m_fontSize)
+        return;
+    m_fontSize = size;
+    m_lineHeight = m_fontSize * m_lineHeightFactor;
+    RebuildTextFormats();
+    SetLineNumbers(m_showLineNumbers, m_lineNumberTotal);   // 字号变了重算行号栏宽
+}
+
+void CRenderer::SetFonts(const std::wstring& primary, const std::wstring& cjkFallback)
+{
+    if (primary == m_fontFamily && cjkFallback == m_fontFallbackFamily)
+        return;
+    m_fontFamily = primary;
+    m_fontFallbackFamily = cjkFallback;
+    RebuildTextFormats();
+    SetLineNumbers(m_showLineNumbers, m_lineNumberTotal);   // 字体变了重算行号栏宽
+}
+
+void CRenderer::SetTheme(bool dark)
+{
+    if (m_dark == dark)
+        return;
+    m_dark = dark;
+    CreateThemeBrushes();
+}
+
+void CRenderer::RebuildTextFormats()
+{
+    if (m_pGutterFormat)   { m_pGutterFormat->Release();   m_pGutterFormat = nullptr; }
+    if (m_pEmojiFormat)    { m_pEmojiFormat->Release();    m_pEmojiFormat = nullptr; }
+    if (m_pTextFormat)     { m_pTextFormat->Release();     m_pTextFormat = nullptr; }
+    if (!m_pDWriteFactory)
+        return;
+
+    wchar_t locale[LOCALE_NAME_MAX_LENGTH] = {};
+    GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH);
+
+    if (FAILED(m_pDWriteFactory->CreateTextFormat(
+            m_fontFamily.c_str(), nullptr,
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            m_fontSize, locale, &m_pTextFormat)))
+        return;
+
+    // Emoji 专用格式（彩色字形）
+    m_pDWriteFactory->CreateTextFormat(
+        L"Segoe UI Emoji", nullptr,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+        m_fontSize, locale, &m_pEmojiFormat);
+
+    // 行号数字格式（右对齐）
+    if (SUCCEEDED(m_pDWriteFactory->CreateTextFormat(
+            m_fontFamily.c_str(), nullptr,
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            m_fontSize, locale, &m_pGutterFormat)))
+        m_pGutterFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+    RebuildFallback();
+}
+
+void CRenderer::RebuildFallback()
+{
+    if (m_pCustomFallback) { m_pCustomFallback->Release(); m_pCustomFallback = nullptr; }
+    if (!m_pDWriteFactory2)
+        return;
+
+    // 多字体顺序回退：先尝试主字体，缺字形再落到中文回退字体，最后系统回退兜底
+    IDWriteFontFallbackBuilder* builder = nullptr;
+    if (FAILED(m_pDWriteFactory2->CreateFontFallbackBuilder(&builder)) || !builder)
+        return;
+
+    // 基础拉丁/符号区段 → 主字体
+    DWRITE_UNICODE_RANGE latin[] = { { 0x0000u, 0x2E7Fu } };
+    const wchar_t* latinFamilies[] = { m_fontFamily.c_str() };
+    builder->AddMapping(latin, 1, latinFamilies, 1);
+
+    // CJK 区段 → 回退字体
+    DWRITE_UNICODE_RANGE cjk[] = {
+        { 0x2E80u,  0x9FFFu  },   // CJK 部首/符号/统一表意
+        { 0xF900u,  0xFAFFu  },   // CJK 兼容表意
+        { 0xFF00u,  0xFFEFu  },   // 全角形式
+        { 0x20000u, 0x2FA1Fu },   // CJK 扩展 B+
+    };
+    const wchar_t* cjkFamilies[] = { m_fontFallbackFamily.c_str() };
+    builder->AddMapping(cjk, 4, cjkFamilies, 1);
+
+    // 其余区段（Emoji 等）交给系统回退兜底
+    if (m_pSystemFallback)
+        builder->AddMappings(m_pSystemFallback);
+
+    builder->CreateFontFallback(&m_pCustomFallback);
+    builder->Release();
+}
+
+void CRenderer::SetLineNumbers(bool show, DWORD totalLines)
+{
+    m_showLineNumbers = show;
+    m_lineNumberTotal = totalLines;
+    m_gutterWidth = 0.0f;
+    if (!show || !m_pGutterFormat || !m_pDWriteFactory)
+        return;
+
+    // 按最大行号位数决定栏宽（至少 2 位，右对齐后左右各留边距）
+    DWORD n = totalLines > 0 ? totalLines : 1;
+    int digits = 1;
+    while (n >= 10) { n /= 10; ++digits; }
+    if (digits < 2)
+        digits = 2;
+
+    std::wstring probe(static_cast<size_t>(digits), L'8');
+    IDWriteTextLayout* layout = nullptr;
+    if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
+            probe.c_str(), static_cast<UINT32>(probe.size()), m_pGutterFormat,
+            1000.0f, m_lineHeight, &layout)))
+    {
+        DWRITE_TEXT_METRICS m{};
+        layout->GetMetrics(&m);
+        layout->Release();
+        m_gutterWidth = m.widthIncludingTrailingWhitespace + 14.0f;
+    }
+    else
+    {
+        m_gutterWidth = digits * m_fontSize * 0.6f + 14.0f;
+    }
+}
+
+float CRenderer::GetGutterWidth() const
+{
+    return m_showLineNumbers ? m_gutterWidth : 0.0f;
+}
+
 IDWriteTextLayout* CRenderer::CreateLayoutForRow(const wchar_t* text, UINT32 len,
-                                                 float clientWidth, float lineHeight) const
+                                                 float maxWidth) const
 {
     if (!m_pDWriteFactory || !m_pTextFormat)
         return nullptr;
 
     IDWriteTextLayout* pLayout = nullptr;
     if (FAILED(m_pDWriteFactory->CreateTextLayout(text, len, m_pTextFormat,
-                                                  clientWidth, lineHeight, &pLayout)))
+                                                  (std::max)(1.0f, maxWidth), m_lineHeight, &pLayout)))
         return nullptr;
 
-    // 显式安装系统字体回退（中文/Emoji 缺字形时自动匹配）
-    if (m_pSystemFallback)
+    // 排版行为与"视觉行堆叠"保持一致：均匀行距 + 当前换行模式。
+    // 均匀行距保证换行子行严格按 m_lineHeight 排布，光标/命中的 y 偏移才能对齐。
+    pLayout->SetWordWrapping(m_wordWrap ? DWRITE_WORD_WRAPPING_WRAP
+                                        : DWRITE_WORD_WRAPPING_NO_WRAP);
+    pLayout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,
+                            m_lineHeight, m_lineHeight * BaselineRatio());
+
+    // 显式安装字体回退（优先用户多字体链，其次系统回退）
+    IDWriteTextLayout2* pLayout2 = nullptr;
+    if (SUCCEEDED(pLayout->QueryInterface(__uuidof(IDWriteTextLayout2),
+                                          reinterpret_cast<void**>(&pLayout2))))
     {
-        IDWriteTextLayout2* pLayout2 = nullptr;
-        if (SUCCEEDED(pLayout->QueryInterface(__uuidof(IDWriteTextLayout2),
-                                              reinterpret_cast<void**>(&pLayout2))))
-        {
+        if (m_pCustomFallback)
+            pLayout2->SetFontFallback(m_pCustomFallback);
+        else if (m_pSystemFallback)
             pLayout2->SetFontFallback(m_pSystemFallback);
-            pLayout2->Release();
-        }
+        pLayout2->Release();
     }
 
     return pLayout;
@@ -224,29 +420,83 @@ void CRenderer::ApplyEmojiFontMapping(IDWriteTextLayout* pLayout,
     flush();
 }
 
-void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, int clientWidth,
+UINT CRenderer::GetRowVisualCount(const std::wstring& text, float maxWidth) const
+{
+    if (!m_wordWrap)
+        return 1;
+    IDWriteTextLayout* layout = CreateLayoutForRow(
+        text.c_str(), static_cast<UINT32>(text.size()), maxWidth);
+    if (!layout)
+        return 1;
+    UINT32 lineCount = 0;
+    layout->GetLineMetrics(nullptr, 0, &lineCount);
+    layout->Release();
+    return lineCount > 0 ? static_cast<UINT>(lineCount) : 1;
+}
+
+bool CRenderer::GetCaretPoint(const std::wstring& text, DWORD col, float maxWidth,
+                              float* px, float* py) const
+{
+    if (px) *px = 0.0f;
+    if (py) *py = 0.0f;
+    IDWriteTextLayout* layout = CreateLayoutForRow(
+        text.c_str(), static_cast<UINT32>(text.size()), maxWidth);
+    if (!layout)
+        return false;
+    ApplyEmojiFontMapping(layout, text.c_str(), static_cast<UINT32>(text.size()));
+
+    UINT32 cp = static_cast<UINT32>(col < text.size() ? col : text.size());
+    float x = 0, y = 0;
+    DWRITE_HIT_TEST_METRICS hit{};
+    layout->HitTestTextPosition(cp, FALSE, &x, &y, &hit);
+    layout->Release();
+    if (px) *px = x;
+    if (py) *py = y;
+    return true;
+}
+
+void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, float textAreaWidth,
+                       float clientHeight, float originX,
                        DWORD caretRow, DWORD caretCol, bool caretVisible,
-                       const Selection& sel)
+                       const Selection& sel, float* pMaxRowWidth)
 {
     if (!m_pRT)
         return;
 
+    if (pMaxRowWidth)
+        *pMaxRowWidth = 0.0f;
+
     m_pRT->BeginDraw();
-    m_pRT->Clear(D2D1::ColorF(D2D1::ColorF::White));
+    m_pRT->Clear(m_pBackgroundBrush->GetColor());
+
+    float gutterW = GetGutterWidth();
+
+    // 行号栏背景 + 分隔线（不随水平滚动移动）
+    if (m_showLineNumbers && gutterW > 0.0f)
+    {
+        m_pRT->FillRectangle(D2D1::RectF(0.0f, 0.0f, gutterW, clientHeight),
+                             m_pGutterBgBrush);
+        m_pRT->FillRectangle(D2D1::RectF(gutterW - 1.0f, 0.0f, gutterW, clientHeight),
+                             m_pGutterLineBrush);
+    }
 
     for (size_t i = 0; i < rows.size(); ++i)
     {
         const Row& row = rows[i];
         IDWriteTextLayout* pLayout = CreateLayoutForRow(
-            row.text.c_str(), static_cast<UINT32>(row.text.size()),
-            static_cast<float>(clientWidth), static_cast<float>(lineHeight));
+            row.text.c_str(), static_cast<UINT32>(row.text.size()), textAreaWidth);
         if (!pLayout)
             continue;
 
         ApplyEmojiFontMapping(pLayout, row.text.c_str(),
                               static_cast<UINT32>(row.text.size()));
 
-        float y = static_cast<float>(i * lineHeight);
+        float y = row.yTop;
+
+        DWRITE_TEXT_METRICS metrics{};
+        pLayout->GetMetrics(&metrics);
+        if (pMaxRowWidth && metrics.widthIncludingTrailingWhitespace > *pMaxRowWidth)
+            *pMaxRowWidth = metrics.widthIncludingTrailingWhitespace;
 
         // 选区高亮：本行与选区交叠的字符区间绘制半透明背景
         if (sel.active)
@@ -286,14 +536,14 @@ void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, int clientW
 
             if (selLen > 0)
             {
-                // HitTestTextRange 返回的 metrics 已含 origin 偏移（实测验证），
-                // origin 传 (0, y) 后 top/left 即为最终客户区坐标，不能再加 y
+                // HitTestTextRange 返回的 metrics 已含传入的 origin 偏移，
+                // 传 (originX, y) 后 left/top 即为最终客户区坐标，不能再加 y
                 UINT32 maxHits = selLen + 1;
                 std::vector<DWRITE_HIT_TEST_METRICS> hits(maxHits);
                 UINT32 hitCount = 0;
                 HRESULT hr = pLayout->HitTestTextRange(
                     static_cast<UINT32>(selStart), static_cast<UINT32>(selLen),
-                    0.0f, y, hits.data(), maxHits, &hitCount);
+                    originX, y, hits.data(), maxHits, &hitCount);
                 if (SUCCEEDED(hr) && hitCount > 0)
                 {
                     if (hitCount > maxHits)
@@ -311,18 +561,36 @@ void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, int clientW
         }
 
         m_pRT->DrawTextLayout(
-            D2D1::Point2F(0.0f, y), pLayout, m_pTextBrush,
+            D2D1::Point2F(originX, y), pLayout, m_pTextBrush,
             D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
 
-        // 光标：仅在可见且位于该行时绘制
+        // 行号数字（右对齐于行号栏内）
+        if (m_showLineNumbers && gutterW > 0.0f && m_pGutterFormat)
+        {
+            wchar_t num[16];
+            wsprintfW(num, L"%u", static_cast<unsigned>(row.row + 1));
+            D2D1_RECT_F numRect = D2D1::RectF(4.0f, y, gutterW - 6.0f, y + lineHeight);
+            m_pRT->DrawTextW(num, static_cast<UINT32>(wcslen(num)), m_pGutterFormat,
+                             numRect, m_pGutterTextBrush);
+        }
+
+        // 光标：仅在可见且位于该行时绘制。
+        // HitTestTextPosition 的 y 含换行子行偏移，自动换行后光标跟随行尾。
+        // 光标高度 = 字体高度（约 1.2 倍字号），底部对齐基线（均匀行距下基线
+        // 位于 80% 行高处），而非整个行高
         if (caretVisible && row.row == caretRow)
         {
             DWRITE_HIT_TEST_METRICS hit{};
             float x = 0, yAfter = 0;
             UINT32 cp = static_cast<UINT32>(caretCol < row.text.size() ? caretCol : row.text.size());
             pLayout->HitTestTextPosition(cp, FALSE, &x, &yAfter, &hit);
+            float caretH = m_fontSize * 1.2f;
+            float baseline = y + yAfter + m_lineHeight * BaselineRatio();
+            float caretTop = baseline - caretH;
+            if (caretTop < y)
+                caretTop = y;   // 防御：行高过小时不越过该行顶部
             m_pRT->FillRectangle(
-                D2D1::RectF(x, y, x + 1.5f, y + static_cast<float>(lineHeight)),
+                D2D1::RectF(originX + x, caretTop, originX + x + 1.5f, baseline),
                 m_pCaretBrush);
         }
 
@@ -334,22 +602,40 @@ void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, int clientW
         Resize();
 }
 
-bool CRenderer::HitTestPoint(const std::vector<Row>& rows, int lineHeight, int clientWidth,
+bool CRenderer::HitTestPoint(const std::vector<Row>& rows, int lineHeight, float textAreaWidth,
                              float x, float y, DWORD* pRow, DWORD* pCol) const
 {
-    if (!pRow || !pCol)
+    if (!pRow || !pCol || rows.empty())
         return false;
 
-    int rowIndex = static_cast<int>(y) / lineHeight;
-    if (rowIndex < 0 || rowIndex >= static_cast<int>(rows.size()))
-        return false;
+    // 按 yTop 区间定位逻辑行（自动换行后一个逻辑行占多条视觉线）
+    const Row* hitRow = nullptr;
+    float yLocal = 0.0f;
+    if (y < rows.front().yTop)
+    {
+        hitRow = &rows.front();
+        yLocal = y - rows.front().yTop;   // 吸附到首行顶部
+    }
+    else
+    {
+        for (const auto& r : rows)
+        {
+            float bottom = r.yTop + static_cast<float>(r.visualLines) * lineHeight;
+            if (y < bottom)
+            {
+                hitRow = &r;
+                yLocal = y - r.yTop;
+                break;
+            }
+        }
+        if (!hitRow)
+            return false;   // 最后一行之下的空白区 → 调用方按"跳到文末"处理
+    }
 
-    const Row& row = rows[rowIndex];
-    *pRow = row.row;
+    *pRow = hitRow->row;
 
     IDWriteTextLayout* pLayout = CreateLayoutForRow(
-        row.text.c_str(), static_cast<UINT32>(row.text.size()),
-        static_cast<float>(clientWidth), static_cast<float>(lineHeight));
+        hitRow->text.c_str(), static_cast<UINT32>(hitRow->text.size()), textAreaWidth);
     if (!pLayout)
     {
         *pCol = 0;
@@ -357,14 +643,13 @@ bool CRenderer::HitTestPoint(const std::vector<Row>& rows, int lineHeight, int c
     }
 
     // 与 Render 保持一致：Emoji 字体映射会影响字符宽度，命中才能对齐
-    this->ApplyEmojiFontMapping(pLayout, row.text.c_str(),
-                                static_cast<UINT32>(row.text.size()));
+    this->ApplyEmojiFontMapping(pLayout, hitRow->text.c_str(),
+                                static_cast<UINT32>(hitRow->text.size()));
 
     BOOL isTrailing = FALSE;
     BOOL isInside = FALSE;
     DWRITE_HIT_TEST_METRICS hit{};
-    HRESULT hr = pLayout->HitTestPoint(x, y - static_cast<float>(rowIndex * lineHeight),
-                                       &isTrailing, &isInside, &hit);
+    HRESULT hr = pLayout->HitTestPoint(x, yLocal, &isTrailing, &isInside, &hit);
     pLayout->Release();
 
     if (SUCCEEDED(hr))
@@ -377,7 +662,10 @@ bool CRenderer::HitTestPoint(const std::vector<Row>& rows, int lineHeight, int c
             *pCol = hit.textPosition;
     }
     else
-        *pCol = static_cast<DWORD>(row.text.size());
+        *pCol = static_cast<DWORD>(hitRow->text.size());
+
+    if (*pCol > hitRow->text.size())
+        *pCol = static_cast<DWORD>(hitRow->text.size());
 
     return true;
 }

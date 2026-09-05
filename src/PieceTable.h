@@ -42,6 +42,10 @@ public:
     uint64_t UndoOffset() const;
     uint64_t RedoOffset() const;
 
+    // 已应用命令总数（含被 kMaxUndo 裁剪掉的）：
+    // 单调递增的"历史位置"，保存时记下快照，与当前值比较即可判断内容是否回到已保存状态
+    size_t HistoryPosition() const;
+
     // 逻辑总长度（字节）
     uint64_t Size() const;
 
@@ -68,6 +72,7 @@ private:
 
     std::vector<EditCommand> m_undoStack;
     std::vector<EditCommand> m_redoStack;
+    size_t m_historyTrimmed;   // 超出 kMaxUndo 被裁剪的底部命令数（HistoryPosition 用）
     uint64_t m_lastUndoOfs;
     uint64_t m_lastRedoOfs;
     static constexpr size_t kMaxUndo = 1000;

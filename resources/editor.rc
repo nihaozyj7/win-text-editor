@@ -1,0 +1,7 @@
+// 资源：应用图标 + 应用程序清单（公共控件 v6，深色菜单栏需要）
+#include <windows.h>
+
+// 应用图标（CEditorWindow 注册窗口类时按此 ID 加载，资源编译进 exe 供资源管理器显示）
+1 ICON "editor.ico"
+
+1 RT_MANIFEST "app.manifest"

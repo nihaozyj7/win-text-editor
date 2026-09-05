@@ -27,7 +27,7 @@ Windows 记事本风格文本编辑器：Win32 + Direct2D/DirectWrite，C++20，
 ## 关键约束与已知坑（多为已修复 bug，勿回退）
 
 - **坐标体系**：所有偏移均为“逻辑字节偏移”（原文件编码下的字节），不是 UTF-16 字符位置。PosToByte/ByteToPos 换算需注意 BOM 占用的字节（见 fix 0738be7）。
-- **编辑同步**：每次 Insert/Erase 后必须调用 `CLineIndex::NotifyEdit(ofs, deltaBytes, deltaLines)`，否则行索引失步（曾出 bug）；关键帧漂移过大时它内部会全量重建。
+- **编辑同步**：每次 Insert/Erase 后必须调用 `CLineIndex::NotifyEditRange(ofs, oldEnd, deltaBytes, deltaLines)`（`NotifyEdit` 为纯插入特例），否则行索引失步（曾出 bug）。行结构变化走关键帧增删/平移（O(帧数)），**大文件常规编辑禁止用 `Build` 全量重建**（曾因回车触发全量扫描导致卡顿）；撤销/重做等无法给出增量的场景才允许全量重建。
 - **UTF-16 换行扫描**按 code unit（2 字节）进行，字节 0x0A 不是换行；新增扫描逻辑务必走 `ScanState::ReadUnit`。
 - **编码/入口**：源码为 UTF-8，编译带 `-finput-charset=UTF-8 -fexec-charset=UTF-8`，`UNICODE/_UNICODE` 已定义，入口是 `wWinMain`（`-municode`）；新增字符串用宽字符。
 - **UI 细节**：主窗口带 `WS_CLIPCHILDREN` 防闪烁；IME 走 `WM_IME_CHAR` 分支；这些处理在 `CEditorWindow.cpp`，改消息处理前先看现有分支。

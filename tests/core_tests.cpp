@@ -275,6 +275,118 @@ static void TestLineIndexIncrementalEdit()
     CHECK(idx2.GetLineStart(2) == 7);   // 6 + 1
 }
 
+// 行结构变化的增量更新：NotifyEditRange / NotifyEdit(deltaLines≠0) 必须与
+// 全量 Build 的结果一致（大文件编辑卡顿修复的关键路径）
+static void TestLineIndexIncrementalLines()
+{
+    // 对照函数：对 PieceTable 当前内容全量重建的期望值
+    auto rebuild = [](PieceTable& pt, CLineIndex& idx) {
+        idx.Build(
+            [&pt](uint64_t ofs, unsigned char* dst, uint64_t maxLen) -> uint64_t {
+                return pt.ReadRange(ofs, dst, maxLen);
+            },
+            pt.Size(), Encoding::Utf8);
+    };
+
+    // ---- 用例 1：行中插入换行（回车）----
+    {
+        const char* text = "alpha\nbeta\ngamma\ndelta";
+        PieceTable pt;
+        pt.SetOriginal(reinterpret_cast<const unsigned char*>(text), std::strlen(text));
+        CLineIndex idx;
+        rebuild(pt, idx);
+        CHECK(idx.GetLineCount() == 4);
+
+        const char* nl = "\r\n";
+        pt.Insert(7, reinterpret_cast<const unsigned char*>(nl), 2);  // "be|ta" 行中回车
+        idx.NotifyEditRange(7, 7, 2, 1);
+
+        CLineIndex expect;
+        rebuild(pt, expect);
+        CHECK(idx.GetLineCount() == expect.GetLineCount());
+        CHECK(idx.GetLineCount() == 5);
+        for (uint64_t r = 0; r < idx.GetLineCount(); ++r)
+        {
+            CHECK(idx.GetLineStart(r) == expect.GetLineStart(r));
+            CHECK(idx.GetLineLength(r) == expect.GetLineLength(r));
+        }
+        CHECK(idx.ByteOffsetToRow(0) == 0);
+        CHECK(idx.ByteOffsetToRow(7) == 1);   // 插入的 \r 在新行 1
+        CHECK(idx.ByteOffsetToRow(9) == 2);   // "ta" 在新行 2
+        CHECK(idx.ByteOffsetToRow(11) == 2);
+    }
+
+    // ---- 用例 2：行首插入换行（关键帧恰好位于编辑点）----
+    {
+        const char* text = "aa\nbb\ncc\ndd";
+        PieceTable pt;
+        pt.SetOriginal(reinterpret_cast<const unsigned char*>(text), std::strlen(text));
+        CLineIndex idx;
+        rebuild(pt, idx);
+
+        const char* nl = "\r\n";
+        pt.Insert(3, reinterpret_cast<const unsigned char*>(nl), 2);  // 行首(第1行)回车
+        idx.NotifyEditRange(3, 3, 2, 1);
+
+        CLineIndex expect;
+        rebuild(pt, expect);
+        CHECK(idx.GetLineCount() == expect.GetLineCount());
+        for (uint64_t r = 0; r < idx.GetLineCount(); ++r)
+            CHECK(idx.GetLineStart(r) == expect.GetLineStart(r));
+        CHECK(idx.ByteOffsetToRow(3) == 1);
+        CHECK(idx.ByteOffsetToRow(5) == 2);
+    }
+
+    // ---- 用例 3：跨行删除（合并两行）----
+    {
+        const char* text = "aa\nbb\ncc\ndd\nee";
+        PieceTable pt;
+        pt.SetOriginal(reinterpret_cast<const unsigned char*>(text), std::strlen(text));
+        CLineIndex idx;
+        rebuild(pt, idx);
+        CHECK(idx.GetLineCount() == 5);
+
+        // 删除 [2, 5) = "\nbb" → "aa" 与 "cc" 合并
+        pt.Erase(2, 3);
+        idx.NotifyEditRange(2, 5, -3, -1);
+
+        CLineIndex expect;
+        rebuild(pt, expect);
+        CHECK(idx.GetLineCount() == expect.GetLineCount());
+        CHECK(idx.GetLineCount() == 4);
+        for (uint64_t r = 0; r < idx.GetLineCount(); ++r)
+        {
+            CHECK(idx.GetLineStart(r) == expect.GetLineStart(r));
+            CHECK(idx.GetLineLength(r) == expect.GetLineLength(r));
+        }
+    }
+
+    // ---- 用例 4：连续多次编辑（关键帧漂移累积）----
+    {
+        const char* text = "1\n2\n3\n4\n5\n6\n7\n8";
+        PieceTable pt;
+        pt.SetOriginal(reinterpret_cast<const unsigned char*>(text), std::strlen(text));
+        CLineIndex idx;
+        rebuild(pt, idx);
+
+        // 固定在 "1\n" 之后连续回车 50 次：每次净 +1 行，考验增量累积
+        for (int i = 0; i < 50; ++i)
+        {
+            const char* nl = "\r\n";
+            pt.Insert(2, reinterpret_cast<const unsigned char*>(nl), 2);
+            idx.NotifyEditRange(2, 2, 2, 1);
+        }
+        CLineIndex expect;
+        rebuild(pt, expect);
+        CHECK(idx.GetLineCount() == expect.GetLineCount());
+        for (uint64_t r = 0; r < idx.GetLineCount(); ++r)
+        {
+            CHECK(idx.GetLineStart(r) == expect.GetLineStart(r));
+            CHECK(idx.GetLineLength(r) == expect.GetLineLength(r));
+        }
+    }
+}
+
 int main()
 {
     std::printf("== core_tests ==\n");
@@ -287,6 +399,7 @@ int main()
     TestLineIndexOnPieceTable();
     TestLineIndexUtf16();
     TestLineIndexIncrementalEdit();
+    TestLineIndexIncrementalLines();
 
     if (g_failures == 0)
     {

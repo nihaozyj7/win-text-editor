@@ -32,6 +32,11 @@ public:
     // 仅平移受影响关键帧的偏移/行号，O(帧数)；帧间距漂移过大时自动全量重建
     void NotifyEdit(uint64_t ofs, int64_t deltaBytes, int64_t deltaLines);
 
+    // 带删除区间的编辑增量：删除 [ofs, oldEndOfs)、随后在 ofs 处净增
+    // deltaBytes / deltaLines（插入时 oldEndOfs == ofs）。
+    // 行结构变化也走关键帧增删/平移（O(帧数)），避免大文件全量重建
+    void NotifyEditRange(uint64_t ofs, uint64_t oldEndOfs, int64_t deltaBytes, int64_t deltaLines);
+
     uint64_t GetLineCount() const;
     bool     IsValid() const;   // 已设置数据源（含空文档，此时视为 1 个空行）
 
@@ -55,6 +60,8 @@ private:
         mutable uint64_t blockLen;
         const uint64_t kBlockSize = 1 << 16;
 
+        // 把块缓存重新填充为覆盖 byteOfs 的对齐块（64KB 一块）
+        void Refill(uint64_t byteOfs) const;
         // 读取一个 code unit（1 或 2 字节，按编码交换字节序）；返回 -1 表示越界
         int64_t ReadUnit(uint64_t byteOfs) const;
         // 找到从 byteOfs 起的下一个行尾 unit 偏移（返回行尾 unit 的字节偏移），无则返回 size

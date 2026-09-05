@@ -2,6 +2,17 @@
 #include <cstring>
 #include <algorithm>
 
+// 在块内 [p, p+avail) 找 0x0A/0x0D 中较早出现者的指针；找不到返回 nullptr
+// （单字节编码用，memchr 走 libc 的 SIMD 实现）
+static const unsigned char* FindBreakInBlock(const unsigned char* p, uint64_t avail)
+{
+    const unsigned char* hLF = static_cast<const unsigned char*>(memchr(p, 0x0A, avail));
+    const unsigned char* hCR = static_cast<const unsigned char*>(memchr(p, 0x0D, avail));
+    if (hLF && hCR)
+        return (hLF < hCR) ? hLF : hCR;
+    return hLF ? hLF : hCR;
+}
+
 CLineIndex::CLineIndex()
     : m_lineCount(0)
     , m_editEpoch(0)
@@ -64,27 +75,65 @@ void CLineIndex::BuildAll()
         return;
     }
 
-    // 扫描 code units，统计行；每 kFrameInterval 行记录一个关键帧
+    // 扫描 code units，统计行；每 kFrameInterval 行记录一个关键帧。
+    // 块内批量扫描（memchr/紧凑循环）替代逐 unit ReadUnit——
+    // 逐字节函数调用是大文件构建的主要耗时
     uint64_t breaks = 0;
     uint64_t pos = 0;
     m_keyFrames.push_back({ 0, 0 });
 
     while (pos < m_scan.size)
     {
-        int64_t unit = m_scan.ReadUnit(pos);
-        if (unit < 0)
-            break;
-        if (unit == 0x0A || unit == 0x0D)
+        if (pos < m_scan.blockStart || pos >= m_scan.blockStart + m_scan.blockLen)
+            m_scan.Refill(pos);
+        uint64_t rel = pos - m_scan.blockStart;
+        if (rel >= m_scan.blockLen)
+            break;   // reader 提前截断（防御）
+
+        if (m_scan.unitBytes == 1)
         {
+            // ANSI/UTF-8：块内 memchr 找 0x0A/0x0D 中较早出现者
+            const unsigned char* hit = FindBreakInBlock(m_scan.block + rel,
+                                                        m_scan.blockLen - rel);
+            if (!hit)
+            {
+                pos = m_scan.blockStart + m_scan.blockLen;   // 本块无换行，跳到下一块
+                continue;
+            }
             ++breaks;
-            pos = m_scan.SkipBreak(pos);
-            if (breaks % kFrameInterval == 0)
-                m_keyFrames.push_back({ breaks, pos });
+            pos = m_scan.SkipBreak(m_scan.blockStart + (hit - m_scan.block));
         }
         else
         {
-            pos += m_scan.unitBytes;
+            // UTF-16：块内按 code unit 紧凑扫描
+            uint64_t nUnits = (m_scan.blockLen - rel) / 2;
+            const unsigned char* q = m_scan.block + rel;
+            uint64_t i = 0;
+            for (; i < nUnits; ++i, q += 2)
+            {
+                uint32_t u = m_scan.utf16Swap ? ((q[0] << 8) | q[1])
+                                              : (q[0] | (q[1] << 8));
+                if (u == 0x0A || u == 0x0D)
+                    break;
+            }
+            if (i < nUnits)
+            {
+                ++breaks;
+                pos = m_scan.SkipBreak(m_scan.blockStart + rel + i * 2);
+            }
+            else if (nUnits == 0)
+            {
+                break;   // 剩余不足一个完整 unit（防御）
+            }
+            else
+            {
+                pos = m_scan.blockStart + rel + nUnits * 2;   // 本块无换行
+                continue;
+            }
         }
+
+        if (breaks % kFrameInterval == 0)
+            m_keyFrames.push_back({ breaks, pos });
     }
 
     bool endsWithBreak = false;
@@ -99,6 +148,13 @@ void CLineIndex::BuildAll()
 
 void CLineIndex::NotifyEdit(uint64_t ofs, int64_t deltaBytes, int64_t deltaLines)
 {
+    // 插入（无删除区间）
+    NotifyEditRange(ofs, ofs, deltaBytes, deltaLines);
+}
+
+void CLineIndex::NotifyEditRange(uint64_t ofs, uint64_t oldEndOfs, int64_t deltaBytes,
+                                 int64_t deltaLines)
+{
     if (!m_scan.reader)
         return;
     ++m_editEpoch;
@@ -109,7 +165,7 @@ void CLineIndex::NotifyEdit(uint64_t ofs, int64_t deltaBytes, int64_t deltaLines
     m_scan.blockStart = 0;
     m_scan.blockLen = 0;
 
-    if (deltaLines == 0 && deltaBytes != 0)
+    if (deltaLines == 0 && deltaBytes != 0 && oldEndOfs == ofs)
     {
         // 行结构不变：编辑点之后所有行的起始偏移整体平移 deltaBytes
         // 编辑点所在行行首 (=ofs，光标在行首) 不变；严格大于 ofs 的行才平移
@@ -124,8 +180,60 @@ void CLineIndex::NotifyEdit(uint64_t ofs, int64_t deltaBytes, int64_t deltaLines
         return;
     }
 
-    // 行结构变化：行号与偏移都受影响，直接全量重建（普通编辑场景可接受）
-    RebuildAll();
+    if (m_scan.size == 0)
+    {
+        // 文档被清空：退化为 1 个空行（与 BuildAll 的空文档约定一致）
+        RebuildAll();
+        return;
+    }
+
+    if (deltaLines != 0)
+    {
+        // 行结构变化：编辑点是一个"字节/行序一致"的切分点——
+        //  1) 位于删除区间内部 (ofs, oldEndOfs) 的关键帧：其行首已被删除，移除
+        //  2) 起点 >= 平移阈值（删除时为 oldEndOfs，纯插入时为 ofs）的关键帧：
+        //     行号 += deltaLines、偏移 += deltaBytes
+        //  3) 其余关键帧：不受影响（ofs 处的行首在删除时保持原位）
+        const uint64_t shiftFrom = (oldEndOfs > ofs) ? oldEndOfs : ofs;
+        std::vector<KeyFrame> adjusted;
+        adjusted.reserve(m_keyFrames.size());
+        for (auto& kf : m_keyFrames)
+        {
+            if (kf.byteOffset > ofs && kf.byteOffset < oldEndOfs)
+                continue;   // 行首落在删除区间内 → 该行已不存在
+            if (kf.byteOffset >= shiftFrom)
+            {
+                kf.row = static_cast<uint64_t>(
+                    static_cast<int64_t>(kf.row) + deltaLines);
+                kf.byteOffset = static_cast<uint64_t>(
+                    static_cast<int64_t>(kf.byteOffset) + deltaBytes);
+            }
+            adjusted.push_back(kf);
+        }
+        m_keyFrames.swap(adjusted);
+        m_lineCount = static_cast<uint64_t>(
+            static_cast<int64_t>(m_lineCount) + deltaLines);
+        if (m_lineCount == 0)
+            m_lineCount = 1;   // 防御：文档非空至少 1 行
+        return;
+    }
+
+    // deltaLines == 0 且有删除区间（行内删除）：编辑点之后的行整体平移 deltaBytes
+    for (auto& kf : m_keyFrames)
+    {
+        if (kf.byteOffset >= oldEndOfs)
+        {
+            kf.byteOffset = static_cast<uint64_t>(
+                static_cast<int64_t>(kf.byteOffset) + deltaBytes);
+        }
+        else if (kf.byteOffset > ofs)
+        {
+            // 行首落在删除区间内 → 该行已不存在（行结构未变时不应发生，防御性移除）
+            // 保守起见交由全量重建兜底
+            RebuildAll();
+            return;
+        }
+    }
 }
 
 void CLineIndex::RebuildAll()
@@ -251,6 +359,16 @@ uint64_t CLineIndex::ByteOffsetToRow(uint64_t offset) const
 
 // ---------- ScanState 辅助 ----------
 
+void CLineIndex::ScanState::Refill(uint64_t byteOfs) const
+{
+    // 对齐到块大小重新填充缓存块
+    blockStart = byteOfs & ~(kBlockSize - 1);
+    uint64_t want = kBlockSize;
+    if (blockStart + want > size)
+        want = size - blockStart;
+    blockLen = reader(blockStart, block, want);
+}
+
 int64_t CLineIndex::ScanState::ReadUnit(uint64_t byteOfs) const
 {
     if (byteOfs >= size)
@@ -259,14 +377,9 @@ int64_t CLineIndex::ScanState::ReadUnit(uint64_t byteOfs) const
     {
         // 块缓存读取
         if (byteOfs < blockStart || byteOfs >= blockStart + blockLen)
-        {
-            // 重新填充缓存块（对齐到块大小）
-            blockStart = byteOfs & ~(kBlockSize - 1);
-            uint64_t want = kBlockSize;
-            if (blockStart + want > size)
-                want = size - blockStart;
-            blockLen = reader(blockStart, block, want);
-        }
+            Refill(byteOfs);
+        if (byteOfs - blockStart >= blockLen)
+            return -1;   // reader 提前截断（防御）
         return block[byteOfs - blockStart];
     }
     else
@@ -274,13 +387,7 @@ int64_t CLineIndex::ScanState::ReadUnit(uint64_t byteOfs) const
         if (byteOfs + 1 >= size)
             return -1;
         if (byteOfs + 1 < blockStart || byteOfs >= blockStart + blockLen)
-        {
-            blockStart = byteOfs & ~(kBlockSize - 1);
-            uint64_t want = kBlockSize;
-            if (blockStart + want > size)
-                want = size - blockStart;
-            blockLen = reader(blockStart, block, want);
-        }
+            Refill(byteOfs);
         uint64_t rel = byteOfs - blockStart;
         if (rel + 1 >= blockLen)
         {
@@ -301,12 +408,38 @@ uint64_t CLineIndex::ScanState::FindBreak(uint64_t byteOfs) const
 {
     while (byteOfs < size)
     {
-        int64_t unit = ReadUnit(byteOfs);
-        if (unit < 0)
-            break;
-        if (unit == 0x0A || unit == 0x0D)
-            return byteOfs;
-        byteOfs += unitBytes;
+        if (byteOfs < blockStart || byteOfs >= blockStart + blockLen)
+            Refill(byteOfs);
+        uint64_t rel = byteOfs - blockStart;
+        if (rel >= blockLen)
+            break;   // reader 提前截断（防御）
+
+        if (unitBytes == 1)
+        {
+            // 块内 memchr 批量找换行（SIMD 加速），替代逐字节 ReadUnit
+            const unsigned char* hit = FindBreakInBlock(block + rel, blockLen - rel);
+            if (!hit)
+            {
+                byteOfs = blockStart + blockLen;   // 本块无换行，跳到下一块
+                continue;
+            }
+            return blockStart + (hit - block);
+        }
+        else
+        {
+            // UTF-16：块内按 code unit（2 字节）紧凑扫描
+            uint64_t nUnits = (blockLen - rel) / 2;
+            const unsigned char* q = block + rel;
+            for (uint64_t i = 0; i < nUnits; ++i, q += 2)
+            {
+                uint32_t u = utf16Swap ? ((q[0] << 8) | q[1]) : (q[0] | (q[1] << 8));
+                if (u == 0x0A || u == 0x0D)
+                    return blockStart + rel + i * 2;
+            }
+            if (nUnits == 0)
+                break;   // 剩余不足一个完整 unit（truncated 尾字节不可能构成换行）
+            byteOfs = blockStart + rel + nUnits * 2;   // 本块无换行
+        }
     }
     return size;
 }
