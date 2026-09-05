@@ -10,3 +10,4 @@ test_*.txt
 # 临时/插件目录
 .video_agent/
 _smoke_test.txt
+out
