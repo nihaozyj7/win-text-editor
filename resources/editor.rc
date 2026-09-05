@@ -5,3 +5,24 @@
 1 ICON "editor.ico"
 
 1 RT_MANIFEST "app.manifest"
+
+// 语言文件类型图标（注册表 DefaultIcon 以 "exe,-<资源ID>" 方式引用）
+// 生成：resources/icons/make_icons.py；ID 与 CEditorWindow.cpp 的 kFileIcon* 常量对应
+100 ICON "icons/cpp.ico"
+101 ICON "icons/csharp.ico"
+102 ICON "icons/java.ico"
+103 ICON "icons/js.ico"
+104 ICON "icons/ts.ico"
+105 ICON "icons/go.ico"
+106 ICON "icons/rust.ico"
+107 ICON "icons/swift.ico"
+108 ICON "icons/php.ico"
+109 ICON "icons/python.ico"
+110 ICON "icons/json.ico"
+111 ICON "icons/markdown.ico"
+112 ICON "icons/config.ico"
+113 ICON "icons/html.ico"
+114 ICON "icons/css.ico"
+115 ICON "icons/sql.ico"
+116 ICON "icons/log.ico"
+117 ICON "icons/text.ico"

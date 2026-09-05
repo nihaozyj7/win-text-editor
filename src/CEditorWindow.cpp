@@ -79,27 +79,87 @@ namespace
         return L"未知";
     }
 
+    // 文件对话框公共配置：txt 为默认类型，未输入扩展名时自动补 .txt
+    void SetupFileDialogFilter(OPENFILENAMEW& ofn)
+    {
+        ofn.lpstrFilter =
+            L"文本文件(*.txt)\0*.txt\0"
+            L"日志文件(*.log)\0*.log\0"
+            L"Markdown(*.md)\0*.md\0"
+            L"配置文件(*.ini;*.cfg;*.conf)\0*.ini;*.cfg;*.conf\0"
+            L"源代码文件(*.cpp *.h *.py 等)\0*.cpp;*.h;*.hpp;*.c;*.cc;*.cs;*.java;*.js;*.ts;*.py;*.go;*.rs;*.json;*.html;*.css;*.sql\0"
+            L"所有文件(*.*)\0*.*\0";
+        ofn.lpstrDefExt = L"txt";
+        ofn.nFilterIndex = 1;
+    }
+
     // ---- "设为系统文本编辑器"注册表辅助（仅写 HKCU，无需管理员）----
-    // 方案：注册 ProgId（TextEditor.Document）→ 给支持高亮的扩展名写
-    // OpenWithProgids 候选 → 用户在系统"默认应用"设置页确认。
+    // 方案：每种语言一个 ProgId（TextEditor.<X>，各自绑定专属图标）→ 给该语言
+    // 的扩展名写 OpenWithProgids 候选 → 用户在系统"默认应用"设置页确认。
     // Win10/11 的 UserChoice 由系统哈希保护，程序不可直接改写，这是合规途径。
 
-    // 支持语法高亮 + 纯文本的扩展名（与 Highlighter 的语言表保持一致）
-    const wchar_t* const kDefaultEditorExts[] = {
-        L".txt",
-        L".md", L".markdown", L".mdown", L".mkd",
-        L".log",
-        L".json", L".jsonc", L".json5",
-        L".yml", L".yaml", L".toml", L".ini", L".cfg", L".conf", L".properties", L".env",
-        L".html", L".htm", L".xhtml", L".xml", L".svg",
-        L".css", L".scss", L".less",
-        L".c", L".h", L".cpp", L".cc", L".cxx", L".c++", L".hpp", L".hh", L".hxx",
-        L".cs", L".java", L".kt", L".kts", L".go", L".rs", L".swift", L".m", L".mm",
-        L".js", L".mjs", L".cjs", L".jsx", L".ts", L".tsx", L".php",
-        L".py", L".pyw", L".pyi",
-        L".sql",
+    // exe 内嵌的语言图标资源 ID（resources/editor.rc，生成自 icons/make_icons.py）
+    enum FileIconId
+    {
+        kFileIconCpp = 100, kFileIconCSharp, kFileIconJava, kFileIconJs,
+        kFileIconTs, kFileIconGo, kFileIconRust, kFileIconSwift, kFileIconPhp,
+        kFileIconPython, kFileIconJson, kFileIconMarkdown, kFileIconConfig,
+        kFileIconHtml, kFileIconCss, kFileIconSql, kFileIconLog, kFileIconText,
     };
-    constexpr wchar_t kProgId[] = L"TextEditor.Document";
+
+    struct EditorFileBinding
+    {
+        const wchar_t*        progId;   // HKCU\Software\Classes 下的 ProgId 名
+        const wchar_t*        label;    // 文件类型显示名
+        FileIconId            icon;     // exe 内图标资源
+        const wchar_t* const* exts;     // 归属该语言的扩展名
+        size_t                extCount;
+    };
+
+    // 各语言扩展名表
+    const wchar_t* const kExtsCpp[] = {
+        L".c", L".h", L".cpp", L".cc", L".cxx", L".c++",
+        L".hpp", L".hh", L".hxx" };
+    const wchar_t* const kExtsCSharp[]   = { L".cs" };
+    const wchar_t* const kExtsJava[]     = { L".java" };
+    const wchar_t* const kExtsJs[]       = { L".js", L".mjs", L".cjs", L".jsx" };
+    const wchar_t* const kExtsTs[]       = { L".ts", L".tsx" };
+    const wchar_t* const kExtsGo[]       = { L".go" };
+    const wchar_t* const kExtsRust[]     = { L".rs" };
+    const wchar_t* const kExtsSwift[]    = { L".swift" };
+    const wchar_t* const kExtsPhp[]      = { L".php" };
+    const wchar_t* const kExtsPython[]   = { L".py", L".pyw", L".pyi" };
+    const wchar_t* const kExtsJson[]     = { L".json", L".jsonc", L".json5" };
+    const wchar_t* const kExtsMarkdown[] = { L".md", L".markdown", L".mdown", L".mkd" };
+    const wchar_t* const kExtsConfig[]   = {
+        L".yml", L".yaml", L".toml", L".ini",
+        L".cfg", L".conf", L".properties", L".env" };
+    const wchar_t* const kExtsHtml[]     = { L".html", L".htm", L".xhtml", L".xml" };
+    const wchar_t* const kExtsCss[]      = { L".css", L".scss", L".less" };
+    const wchar_t* const kExtsSql[]      = { L".sql" };
+    const wchar_t* const kExtsLog[]      = { L".log" };
+    const wchar_t* const kExtsText[]     = { L".txt" };
+
+    const EditorFileBinding kFileBindings[] = {
+        { L"TextEditor.CCpp",     L"C/C++ 源文件",    kFileIconCpp,      kExtsCpp,      ARRAYSIZE(kExtsCpp) },
+        { L"TextEditor.CSharp",   L"C# 源文件",       kFileIconCSharp,   kExtsCSharp,   ARRAYSIZE(kExtsCSharp) },
+        { L"TextEditor.Java",     L"Java 源文件",     kFileIconJava,     kExtsJava,     ARRAYSIZE(kExtsJava) },
+        { L"TextEditor.Js",       L"JavaScript 文件", kFileIconJs,       kExtsJs,       ARRAYSIZE(kExtsJs) },
+        { L"TextEditor.Ts",       L"TypeScript 文件", kFileIconTs,       kExtsTs,       ARRAYSIZE(kExtsTs) },
+        { L"TextEditor.Go",       L"Go 源文件",       kFileIconGo,       kExtsGo,       ARRAYSIZE(kExtsGo) },
+        { L"TextEditor.Rust",     L"Rust 源文件",     kFileIconRust,     kExtsRust,     ARRAYSIZE(kExtsRust) },
+        { L"TextEditor.Swift",    L"Swift 源文件",    kFileIconSwift,    kExtsSwift,    ARRAYSIZE(kExtsSwift) },
+        { L"TextEditor.Php",      L"PHP 源文件",      kFileIconPhp,      kExtsPhp,      ARRAYSIZE(kExtsPhp) },
+        { L"TextEditor.Python",   L"Python 源文件",   kFileIconPython,   kExtsPython,   ARRAYSIZE(kExtsPython) },
+        { L"TextEditor.Json",     L"JSON 文件",       kFileIconJson,     kExtsJson,     ARRAYSIZE(kExtsJson) },
+        { L"TextEditor.Markdown", L"Markdown 文档",   kFileIconMarkdown, kExtsMarkdown, ARRAYSIZE(kExtsMarkdown) },
+        { L"TextEditor.Config",   L"配置文件",        kFileIconConfig,   kExtsConfig,   ARRAYSIZE(kExtsConfig) },
+        { L"TextEditor.Html",     L"HTML/XML 文档",   kFileIconHtml,     kExtsHtml,     ARRAYSIZE(kExtsHtml) },
+        { L"TextEditor.Css",      L"样式表",          kFileIconCss,      kExtsCss,      ARRAYSIZE(kExtsCss) },
+        { L"TextEditor.Sql",      L"SQL 脚本",        kFileIconSql,      kExtsSql,      ARRAYSIZE(kExtsSql) },
+        { L"TextEditor.Log",      L"日志文件",        kFileIconLog,      kExtsLog,      ARRAYSIZE(kExtsLog) },
+        { L"TextEditor.Text",     L"文本文档",        kFileIconText,     kExtsText,     ARRAYSIZE(kExtsText) },
+    };
 
     std::wstring CurrentExePath()
     {
@@ -113,98 +173,102 @@ namespace
         return L"\"" + CurrentExePath() + L"\" \"%1\"";
     }
 
-    // ProgId 是否已注册且命令指向当前 exe
+    // 任一 ProgId 已注册且命令指向当前 exe 即视为"已注册"
     bool IsRegisteredAsTextEditor()
     {
-        HKEY key = nullptr;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                L"Software\\Classes\\TextEditor.Document\\shell\\open\\command",
-                0, KEY_READ, &key) != ERROR_SUCCESS)
-            return false;
-        wchar_t buf[MAX_PATH * 2]{};
-        DWORD size = sizeof(buf);
-        LSTATUS st = RegQueryValueExW(key, nullptr, nullptr, nullptr,
-                                      reinterpret_cast<BYTE*>(buf), &size);
-        RegCloseKey(key);
-        if (st != ERROR_SUCCESS)
-            return false;
-        // 忽略大小写/路径差异，比较是否同一 exe
-        return _wcsnicmp(buf, ProgIdCommandValue().c_str(), MAX_PATH * 2) == 0 ||
-               wcsstr(buf, CurrentExePath().c_str()) != nullptr;
+        for (const EditorFileBinding& b : kFileBindings)
+        {
+            std::wstring sub = std::wstring(L"Software\\Classes\\") + b.progId +
+                               L"\\shell\\open\\command";
+            HKEY key = nullptr;
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, sub.c_str(), 0, KEY_READ, &key)
+                != ERROR_SUCCESS)
+                continue;
+            wchar_t buf[MAX_PATH * 2]{};
+            DWORD size = sizeof(buf);
+            LSTATUS st = RegQueryValueExW(key, nullptr, nullptr, nullptr,
+                                          reinterpret_cast<BYTE*>(buf), &size);
+            RegCloseKey(key);
+            if (st == ERROR_SUCCESS &&
+                wcsstr(buf, CurrentExePath().c_str()) != nullptr)
+                return true;
+        }
+        return false;
     }
 
-    // 注册或注销 ProgId 与各扩展名的 OpenWithProgids 候选；返回是否成功
+    // 注册或注销各语言 ProgId 与扩展名的 OpenWithProgids 候选；返回是否成功
     bool RegisterAsTextEditor(bool add)
     {
         const std::wstring cmd = ProgIdCommandValue();
         const std::wstring exe = CurrentExePath();
 
-        if (add)
+        for (const EditorFileBinding& b : kFileBindings)
         {
-            HKEY key = nullptr;
-            // ProgId 显示名
-            if (RegCreateKeyExW(HKEY_CURRENT_USER,
-                    L"Software\\Classes\\TextEditor.Document", 0, nullptr,
-                    REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS)
-                return false;
-            const std::wstring label = L"文本编辑器文档";
-            RegSetValueExW(key, nullptr, 0, REG_SZ,
-                           reinterpret_cast<const BYTE*>(label.c_str()),
-                           static_cast<DWORD>((label.size() + 1) * sizeof(wchar_t)));
-            RegCloseKey(key);
-            // shell\open\command
-            if (RegCreateKeyExW(HKEY_CURRENT_USER,
-                    L"Software\\Classes\\TextEditor.Document\\shell\\open\\command",
-                    0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
-                    &key, nullptr) != ERROR_SUCCESS)
-                return false;
-            RegSetValueExW(key, nullptr, 0, REG_SZ,
-                           const_cast<BYTE*>(reinterpret_cast<const BYTE*>(cmd.c_str())),
-                           static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
-            RegCloseKey(key);
-            // DefaultIcon = exe 内嵌图标
-            if (RegCreateKeyExW(HKEY_CURRENT_USER,
-                    L"Software\\Classes\\TextEditor.Document\\DefaultIcon",
-                    0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
-                    &key, nullptr) == ERROR_SUCCESS)
-            {
-                std::wstring icon = exe + L",0";
-                RegSetValueExW(key, nullptr, 0, REG_SZ,
-                               const_cast<BYTE*>(reinterpret_cast<const BYTE*>(icon.c_str())),
-                               static_cast<DWORD>((icon.size() + 1) * sizeof(wchar_t)));
-                RegCloseKey(key);
-            }
-        }
-
-        // 各扩展名：<ext>\OpenWithProgids 子键下挂 ProgId 候选（值名 = ProgId）
-        for (const wchar_t* ext : kDefaultEditorExts)
-        {
-            std::wstring sub = std::wstring(L"Software\\Classes\\") + ext +
-                               L"\\OpenWithProgids";
-            HKEY key = nullptr;
-            if (RegCreateKeyExW(HKEY_CURRENT_USER, sub.c_str(), 0, nullptr,
-                                REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
-                                &key, nullptr) != ERROR_SUCCESS)
-                continue;
             if (add)
             {
-                RegSetValueExW(key, kProgId, 0, REG_SZ, nullptr, 0);
+                std::wstring base = std::wstring(L"Software\\Classes\\") + b.progId;
+                HKEY key = nullptr;
+                // ProgId 显示名
+                if (RegCreateKeyExW(HKEY_CURRENT_USER, base.c_str(), 0, nullptr,
+                                    REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
+                                    &key, nullptr) != ERROR_SUCCESS)
+                    return false;
+                const std::wstring label = b.label;
+                RegSetValueExW(key, nullptr, 0, REG_SZ,
+                               const_cast<BYTE*>(reinterpret_cast<const BYTE*>(label.c_str())),
+                               static_cast<DWORD>((label.size() + 1) * sizeof(wchar_t)));
+                RegCloseKey(key);
+                // shell\open\command
+                std::wstring cmdSub = base + L"\\shell\\open\\command";
+                if (RegCreateKeyExW(HKEY_CURRENT_USER, cmdSub.c_str(), 0, nullptr,
+                                    REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
+                                    &key, nullptr) != ERROR_SUCCESS)
+                    return false;
+                RegSetValueExW(key, nullptr, 0, REG_SZ,
+                               const_cast<BYTE*>(reinterpret_cast<const BYTE*>(cmd.c_str())),
+                               static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
+                RegCloseKey(key);
+                // DefaultIcon = exe 内嵌语言图标（资源 ID 取负）
+                std::wstring iconSub = base + L"\\DefaultIcon";
+                if (RegCreateKeyExW(HKEY_CURRENT_USER, iconSub.c_str(), 0, nullptr,
+                                    REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
+                                    &key, nullptr) == ERROR_SUCCESS)
+                {
+                    std::wstring icon = L"\"" + exe + L"\",-"
+                        + std::to_wstring(static_cast<int>(b.icon));
+                    RegSetValueExW(key, nullptr, 0, REG_SZ,
+                                   const_cast<BYTE*>(reinterpret_cast<const BYTE*>(icon.c_str())),
+                                   static_cast<DWORD>((icon.size() + 1) * sizeof(wchar_t)));
+                    RegCloseKey(key);
+                }
             }
-            else
-            {
-                RegDeleteValueW(key, kProgId);
-            }
-            RegCloseKey(key);
-        }
 
-        if (!add)
-            RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\TextEditor.Document");
+            // 各扩展名：<ext>\OpenWithProgids 子键下挂 ProgId 候选（值名 = ProgId）
+            for (size_t i = 0; i < b.extCount; ++i)
+            {
+                std::wstring sub = std::wstring(L"Software\\Classes\\") + b.exts[i] +
+                                   L"\\OpenWithProgids";
+                HKEY key = nullptr;
+                if (RegCreateKeyExW(HKEY_CURRENT_USER, sub.c_str(), 0, nullptr,
+                                    REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
+                                    &key, nullptr) != ERROR_SUCCESS)
+                    continue;
+                if (add)
+                    RegSetValueExW(key, b.progId, 0, REG_SZ, nullptr, 0);
+                else
+                    RegDeleteValueW(key, b.progId);
+                RegCloseKey(key);
+            }
+
+            if (!add)
+                RegDeleteTreeW(HKEY_CURRENT_USER,
+                               (std::wstring(L"Software\\Classes\\") + b.progId).c_str());
+        }
 
         // 通知 shell 刷新图标/关联缓存
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
         return true;
     }
-
 
     std::wstring FormatSize(LONGLONG bytes)
     {
@@ -879,7 +943,7 @@ void CEditorWindow::OnCommand(WORD commandId)
         OPENFILENAMEW ofn{};
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner = m_hwnd;
-        ofn.lpstrFilter = L"所有文件(*.*)\0*.*\0文本文件(*.txt)\0*.txt\0";
+        SetupFileDialogFilter(ofn);
         ofn.lpstrFile = path;
         ofn.nMaxFile = MAX_PATH * 4;
         ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
@@ -897,12 +961,10 @@ void CEditorWindow::OnCommand(WORD commandId)
         OPENFILENAMEW ofn{};
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner = m_hwnd;
-        ofn.lpstrFilter = L"所有文件(*.*)\0*.*\0文本文件(*.txt)\0*.txt\0";
+        SetupFileDialogFilter(ofn);
         ofn.lpstrFile = path;
         ofn.nMaxFile = MAX_PATH * 4;
         ofn.Flags = OFN_PATHMUSTEXIST;
-        if (GetSaveFileNameW(&ofn))
-            SaveFile(path);
         break;
     }
     case kExitId:
@@ -1631,7 +1693,7 @@ bool CEditorWindow::SaveDocument()
         OPENFILENAMEW ofn{};
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner = m_hwnd;
-        ofn.lpstrFilter = L"所有文件(*.*)\0*.*\0文本文件(*.txt)\0*.txt\0";
+        SetupFileDialogFilter(ofn);
         ofn.lpstrFile = path;
         ofn.nMaxFile = MAX_PATH * 4;
         ofn.Flags = OFN_PATHMUSTEXIST;

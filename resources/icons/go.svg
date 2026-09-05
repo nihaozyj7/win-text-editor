@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 64 64">
+  <!-- 语法高亮语言图标：GO（生成自 make_icons.py，请勿手改） -->
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3C3C3C"/>
+      <stop offset="1" stop-color="#252526"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00919C"/>
+      <stop offset="1" stop-color="#00919C"/>
+    </linearGradient>
+  </defs>
+  <path d="M12 4h30l12 12v44a2 2 0 0 1-2 2H14a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"
+        fill="url(#paper)" stroke="#858585" stroke-width="1.5"/>
+  <path d="M42 4v10a2 2 0 0 0 2 2h10z" fill="url(#fold)" stroke="#858585" stroke-width="1.5"/>
+  <g stroke-linecap="round" stroke-width="3" fill="none" opacity="0.55">
+    <line x1="18" y1="22" x2="34" y2="22" stroke="#D4D4D4"/>
+    <line x1="18" y1="30" x2="42" y2="30" stroke="#D4D4D4"/>
+    <line x1="18" y1="38" x2="28" y2="38" stroke="#D4D4D4"/>
+  </g>
+  <rect x="14" y="44" width="36" height="14" rx="3" fill="#00919C"/>
+  <text x="32" y="54.2" font-family="'Segoe UI','Microsoft YaHei',Arial,sans-serif"
+        font-weight="700" font-size="17" fill="#FFFFFF"
+        text-anchor="middle">GO</text>
+</svg>
