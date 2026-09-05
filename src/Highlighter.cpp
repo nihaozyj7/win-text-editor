@@ -291,9 +291,9 @@ static void LexCLine(const std::wstring& t, uint32_t stateIn,
             i = j;
             continue;
         }
-        if (c == L'#' && i == 0)
+        if (c == L'#' && i == 0 && !ci)
         {
-            // 非注释语言（C 家族）行首 #：预处理指令
+            // 非注释语言（C 家族）行首 #：预处理指令（SQL 等大小写不敏感语言不适用）
             Push(out, 0, static_cast<uint32_t>(n), TokKind::Preproc);
             return;
         }

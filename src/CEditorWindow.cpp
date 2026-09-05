@@ -965,6 +965,8 @@ void CEditorWindow::OnCommand(WORD commandId)
         ofn.lpstrFile = path;
         ofn.nMaxFile = MAX_PATH * 4;
         ofn.Flags = OFN_PATHMUSTEXIST;
+        if (GetSaveFileNameW(&ofn))
+            SaveFile(path);
         break;
     }
     case kExitId:
@@ -996,6 +998,7 @@ void CEditorWindow::OnCommand(WORD commandId)
         {
             m_hStatusBar = CreateStatusWindowW(WS_CHILD | WS_VISIBLE, L"就绪", m_hwnd, kStatusBarId);
             UpdateStatusBarParts();
+            UpdateStatusFont();
             ApplyMenuTheme(IsDarkTheme());
             SetWindowTheme(m_hStatusBar, IsDarkTheme() ? L"DarkMode_Explorer" : L"Explorer", nullptr);
         }
@@ -1522,6 +1525,26 @@ bool CEditorWindow::OnFileActivateCopyData(LPARAM lParam)
 
 BOOL CEditorWindow::OpenFile(LPCWSTR szPath)
 {
+    // 未保存则先确认（与 WM_CLOSE 同一套提示）：保存 / 不保存 / 取消
+    if (m_dirty)
+    {
+        const wchar_t* name = L"无标题";
+        std::wstring fileName;
+        if (!m_filePath.empty())
+        {
+            size_t p = m_filePath.find_last_of(L"\\/");
+            fileName = (p == std::wstring::npos) ? m_filePath : m_filePath.substr(p + 1);
+            name = fileName.c_str();
+        }
+        wchar_t msg[1024];
+        wsprintfW(msg, L"是否将更改保存到\r\n%s？", name);
+        int r = MessageBoxW(m_hwnd, msg, L"文本编辑器", MB_YESNOCANCEL | MB_ICONWARNING);
+        if (r == IDCANCEL)
+            return FALSE;
+        if (r == IDYES && !SaveDocument())
+            return FALSE;   // 保存失败或在另存为对话框取消 → 放弃本次打开
+    }
+
     // 新建空白文档
     if (!szPath || !szPath[0])
     {
@@ -2713,18 +2736,45 @@ void CEditorWindow::ByteToPos(uint64_t ofs, DWORD* pRow, DWORD* pCol) const
     // 行内内容字节偏移
     uint64_t rel = ofs - contentStart;
 
-    // 从行首起逐 code point 累计编码字节，直到 >= rel
-    std::string prefix;
-    DWORD col = 0;
-    while (col < line.size())
+    // 整行编码一次，再按编码在字节流上走 code point（逐字符调 WideCharToMultiByte
+    // 在长行上是 O(n) 次 API 调用 + 分配）。字节步进与 API 输出一致：
+    // UTF-8 按前导字节定长；UTF-16 每 code unit 2 字节；ANSI/GBK 高字节为双字节首字节
+    std::string enc = EncodeFromWide(line, m_encoding);
+    if (rel >= enc.size())
     {
-        size_t n = (IsHighSurrogate(line[col]) && col + 1 < line.size() &&
-                    IsLowSurrogate(line[col + 1])) ? 2 : 1;
-        std::string enc = EncodeFromWide(line.substr(col, n), m_encoding);
-        if (prefix.size() + enc.size() > rel)
-            break;
-        prefix += enc;
-        col += static_cast<DWORD>(n);
+        *pCol = static_cast<DWORD>(line.size());
+        return;
+    }
+
+    DWORD col = 0;
+    uint64_t acc = 0;
+    size_t i = 0;
+    while (col < line.size() && i < enc.size())
+    {
+        size_t step;
+        if (m_encoding == Encoding::Utf16LE || m_encoding == Encoding::Utf16BE)
+        {
+            step = 2;
+        }
+        else
+        {
+            unsigned char c = static_cast<unsigned char>(enc[i]);
+            if (m_encoding == Encoding::Utf8)
+                step = (c & 0x80) == 0x00 ? 1
+                     : (c & 0xE0) == 0xC0 ? 2
+                     : (c & 0xF0) == 0xE0 ? 3
+                     : 4;
+            else
+                step = (c >= 0x80) ? 2 : 1;   // GBK 双字节 / ASCII（含 '?' 替换）
+        }
+        if (i + step > enc.size())
+            step = enc.size() - i;
+        if (acc + step > rel)
+            break;   // 目标偏移落在该 code point 中间 → 停在其之前
+        acc += step;
+        i += step;
+        // 列号与行内文本的 UTF-16 code unit 对齐：UTF-8 下增补平面字符占 2 列
+        col += (m_encoding == Encoding::Utf8 && step == 4) ? 2u : 1u;
     }
     *pCol = col;
 }

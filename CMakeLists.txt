@@ -53,8 +53,11 @@ target_link_libraries(editor PRIVATE
 target_compile_options(editor PRIVATE
     $<$<CONFIG:Release>:-O2 -ffunction-sections -fdata-sections>
 )
+# 完全静态链接 C++ 运行库：单 exe 免带 libstdc++-6.dll / libgcc_s_seh-1.dll /
+# libwinpthread-1.dll（合计约 3.6MB），单文件分发远小于"exe + DLL"组合
 target_link_options(editor PRIVATE
-    $<$<CONFIG:Release>:-s -Wl,--gc-sections>
+    -static
+    $<$<CONFIG:Release>:-s -Wl,--gc-sections -Wl,--as-needed>
 )
 
 # 核心单元测试（控制台程序，不依赖窗口/D2D）

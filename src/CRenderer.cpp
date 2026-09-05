@@ -563,8 +563,8 @@ void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, float textA
                        const Selection& sel, float* pMaxRowWidth,
                        const ScrollbarDraw* vBar, const ScrollbarDraw* hBar)
 {
-    if (!m_pRT)
-        return;
+    if (!m_pRT || !m_pBackgroundBrush || !m_pTextBrush)
+        return;   // 资源初始化失败（极端情况）时不绘制，避免空指针崩溃
 
     if (pMaxRowWidth)
         *pMaxRowWidth = 0.0f;

@@ -1,6 +1,0 @@
-file 'title.mp4'
-file 'seg_code.mp4'
-file 'seg_big.mp4'
-file 'seg_type.mp4'
-file 'seg_undo.mp4'
-file 'outro.mp4'
