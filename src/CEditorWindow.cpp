@@ -55,6 +55,7 @@ namespace
     constexpr int kThemeLightId  = 351;
     constexpr int kThemeDarkId   = 352;
     constexpr int kAboutId       = 400;
+    constexpr int kDefaultEditorId = 401;   // 设为系统文本编辑器（注册/注销）
 
     constexpr UINT_PTR kCaretTimer = 1;
     constexpr UINT      kCaretBlinkMs = 530;
@@ -77,6 +78,133 @@ namespace
         }
         return L"未知";
     }
+
+    // ---- "设为系统文本编辑器"注册表辅助（仅写 HKCU，无需管理员）----
+    // 方案：注册 ProgId（TextEditor.Document）→ 给支持高亮的扩展名写
+    // OpenWithProgids 候选 → 用户在系统"默认应用"设置页确认。
+    // Win10/11 的 UserChoice 由系统哈希保护，程序不可直接改写，这是合规途径。
+
+    // 支持语法高亮 + 纯文本的扩展名（与 Highlighter 的语言表保持一致）
+    const wchar_t* const kDefaultEditorExts[] = {
+        L".txt",
+        L".md", L".markdown", L".mdown", L".mkd",
+        L".log",
+        L".json", L".jsonc", L".json5",
+        L".yml", L".yaml", L".toml", L".ini", L".cfg", L".conf", L".properties", L".env",
+        L".html", L".htm", L".xhtml", L".xml", L".svg",
+        L".css", L".scss", L".less",
+        L".c", L".h", L".cpp", L".cc", L".cxx", L".c++", L".hpp", L".hh", L".hxx",
+        L".cs", L".java", L".kt", L".kts", L".go", L".rs", L".swift", L".m", L".mm",
+        L".js", L".mjs", L".cjs", L".jsx", L".ts", L".tsx", L".php",
+        L".py", L".pyw", L".pyi",
+        L".sql",
+    };
+    constexpr wchar_t kProgId[] = L"TextEditor.Document";
+
+    std::wstring CurrentExePath()
+    {
+        wchar_t path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        return path;
+    }
+
+    std::wstring ProgIdCommandValue()
+    {
+        return L"\"" + CurrentExePath() + L"\" \"%1\"";
+    }
+
+    // ProgId 是否已注册且命令指向当前 exe
+    bool IsRegisteredAsTextEditor()
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                L"Software\\Classes\\TextEditor.Document\\shell\\open\\command",
+                0, KEY_READ, &key) != ERROR_SUCCESS)
+            return false;
+        wchar_t buf[MAX_PATH * 2]{};
+        DWORD size = sizeof(buf);
+        LSTATUS st = RegQueryValueExW(key, nullptr, nullptr, nullptr,
+                                      reinterpret_cast<BYTE*>(buf), &size);
+        RegCloseKey(key);
+        if (st != ERROR_SUCCESS)
+            return false;
+        // 忽略大小写/路径差异，比较是否同一 exe
+        return _wcsnicmp(buf, ProgIdCommandValue().c_str(), MAX_PATH * 2) == 0 ||
+               wcsstr(buf, CurrentExePath().c_str()) != nullptr;
+    }
+
+    // 注册或注销 ProgId 与各扩展名的 OpenWithProgids 候选；返回是否成功
+    bool RegisterAsTextEditor(bool add)
+    {
+        const std::wstring cmd = ProgIdCommandValue();
+        const std::wstring exe = CurrentExePath();
+
+        if (add)
+        {
+            HKEY key = nullptr;
+            // ProgId 显示名
+            if (RegCreateKeyExW(HKEY_CURRENT_USER,
+                    L"Software\\Classes\\TextEditor.Document", 0, nullptr,
+                    REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+                return false;
+            const std::wstring label = L"文本编辑器文档";
+            RegSetValueExW(key, nullptr, 0, REG_SZ,
+                           reinterpret_cast<const BYTE*>(label.c_str()),
+                           static_cast<DWORD>((label.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(key);
+            // shell\open\command
+            if (RegCreateKeyExW(HKEY_CURRENT_USER,
+                    L"Software\\Classes\\TextEditor.Document\\shell\\open\\command",
+                    0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
+                    &key, nullptr) != ERROR_SUCCESS)
+                return false;
+            RegSetValueExW(key, nullptr, 0, REG_SZ,
+                           const_cast<BYTE*>(reinterpret_cast<const BYTE*>(cmd.c_str())),
+                           static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(key);
+            // DefaultIcon = exe 内嵌图标
+            if (RegCreateKeyExW(HKEY_CURRENT_USER,
+                    L"Software\\Classes\\TextEditor.Document\\DefaultIcon",
+                    0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
+                    &key, nullptr) == ERROR_SUCCESS)
+            {
+                std::wstring icon = exe + L",0";
+                RegSetValueExW(key, nullptr, 0, REG_SZ,
+                               const_cast<BYTE*>(reinterpret_cast<const BYTE*>(icon.c_str())),
+                               static_cast<DWORD>((icon.size() + 1) * sizeof(wchar_t)));
+                RegCloseKey(key);
+            }
+        }
+
+        // 各扩展名：<ext>\OpenWithProgids 子键下挂 ProgId 候选（值名 = ProgId）
+        for (const wchar_t* ext : kDefaultEditorExts)
+        {
+            std::wstring sub = std::wstring(L"Software\\Classes\\") + ext +
+                               L"\\OpenWithProgids";
+            HKEY key = nullptr;
+            if (RegCreateKeyExW(HKEY_CURRENT_USER, sub.c_str(), 0, nullptr,
+                                REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
+                                &key, nullptr) != ERROR_SUCCESS)
+                continue;
+            if (add)
+            {
+                RegSetValueExW(key, kProgId, 0, REG_SZ, nullptr, 0);
+            }
+            else
+            {
+                RegDeleteValueW(key, kProgId);
+            }
+            RegCloseKey(key);
+        }
+
+        if (!add)
+            RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\TextEditor.Document");
+
+        // 通知 shell 刷新图标/关联缓存
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+        return true;
+    }
+
 
     std::wstring FormatSize(LONGLONG bytes)
     {
@@ -407,11 +535,14 @@ BOOL CEditorWindow::Create(HINSTANCE hInstance, int nCmdShow)
     AppendMenuW(hTheme, MF_STRING, kThemeDarkId,   L"深色(&D)");
     AppendMenuW(hView, MF_POPUP, reinterpret_cast<UINT_PTR>(hTheme), L"主题(&T)");
 
-    AppendMenuW(hMenubar, MF_POPUP, reinterpret_cast<UINT_PTR>(hView), L"查看(&V)");
+    AppendMenuW(hMenubar, MF_POPUP, reinterpret_cast<UINT_PTR>(hView), L"视图(&V)");
 
     HMENU hHelp = CreatePopupMenu();
-    AppendMenuW(hHelp, MF_STRING, kAboutId, L"关于文本编辑器(&A)");
-    AppendMenuW(hMenubar, MF_POPUP, reinterpret_cast<UINT_PTR>(hHelp), L"帮助(&H)");
+    AppendMenuW(hHelp, MF_STRING, kAboutId, L"关于(&A)");
+    AppendMenuW(hHelp, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hHelp, MF_STRING, kDefaultEditorId,
+                L"设为系统文本编辑器(&D)");
+    AppendMenuW(hMenubar, MF_POPUP, reinterpret_cast<UINT_PTR>(hHelp), L"其他(&O)");
 
     m_hMenu = hMenubar;
 
@@ -866,6 +997,31 @@ void CEditorWindow::OnCommand(WORD commandId)
     case kThemeLightId:  m_themeMode = ThemeLight;        SyncMenuChecks(); ApplyThemeToWindow(); SaveSettings(); break;
     case kThemeDarkId:   m_themeMode = ThemeDark;         SyncMenuChecks(); ApplyThemeToWindow(); SaveSettings(); break;
 
+    case kDefaultEditorId:
+    {
+        bool reg = !IsRegisteredAsTextEditor();
+        if (RegisterAsTextEditor(reg))
+        {
+            SyncMenuChecks();
+            MessageBoxW(m_hwnd,
+                reg ? L"已注册为候选文本编辑器（覆盖常见文本/代码/标记格式）。\n\n"
+                      L"Windows 10/11 需在系统设置中确认默认应用：\n"
+                      L"即将打开「设置 → 应用 → 默认应用」，按扩展名选择「文本编辑器」。\n\n"
+                      L"取消勾选菜单项可注销注册。"
+                    : L"已注销系统文本编辑器注册。",
+                L"设为系统文本编辑器", MB_OK | MB_ICONINFORMATION);
+            if (reg)
+                ShellExecuteW(m_hwnd, L"open", L"ms-settings:defaultapps",
+                              nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        else
+        {
+            MessageBoxW(m_hwnd, L"注册表写入失败。", L"设为系统文本编辑器",
+                        MB_OK | MB_ICONERROR);
+        }
+        break;
+    }
+
     case kAboutId:
         MessageBoxW(m_hwnd,
             L"文本编辑器 1.0\n\n"
@@ -1124,6 +1280,8 @@ void CEditorWindow::SyncMenuChecks()
     CheckMenuRadioItem(m_hMenu, kLineHeight10Id, kLineHeight20Id, lhIdx, MF_BYCOMMAND);
 
     CheckMenuRadioItem(m_hMenu, kThemeSystemId, kThemeDarkId, m_themeMode, MF_BYCOMMAND);
+    CheckMenuItem(m_hMenu, kDefaultEditorId,
+                  IsRegisteredAsTextEditor() ? MF_CHECKED : MF_UNCHECKED);
 }
 
 void CEditorWindow::PickFont(bool primary)

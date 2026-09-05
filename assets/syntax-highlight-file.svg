@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="256" height="256">
+  <!-- 语法高亮文本格式图标：文档轮廓 + 彩色代码行 -->
+  <!-- 配色与编辑器高亮主题一致（关键字蓝 #569CD6 / 字符串橙 #CE9178 /
+       注释绿 #6A9955 / 数字黄绿 #B5CEA8 / 预处理紫 #C586C0） -->
+
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3C3C3C"/>
+      <stop offset="1" stop-color="#252526"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5A5A5A"/>
+      <stop offset="1" stop-color="#454545"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 纸张主体 + 右上折角 -->
+  <path d="M12 4h30l12 12v44a2 2 0 0 1-2 2H14a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"
+        fill="url(#paper)" stroke="#858585" stroke-width="1.5"/>
+  <path d="M42 4v10a2 2 0 0 0 2 2h10z" fill="url(#fold)" stroke="#858585" stroke-width="1.5"/>
+
+  <!-- 代码行：模拟语法高亮的彩色 token 片段 -->
+  <g stroke-linecap="round" stroke-width="3" fill="none">
+    <!-- 行 1：#include（预处理紫 + 字符串橙） -->
+    <line x1="18" y1="20" x2="27" y2="20" stroke="#C586C0"/>
+    <line x1="30" y1="20" x2="45" y2="20" stroke="#CE9178"/>
+    <!-- 行 2：关键字蓝 + 普通 -->
+    <line x1="18" y1="28" x2="30" y2="28" stroke="#569CD6"/>
+    <line x1="33" y1="28" x2="40" y2="28" stroke="#9CDCFE"/>
+    <!-- 行 3：注释绿 -->
+    <line x1="18" y1="36" x2="46" y2="36" stroke="#6A9955"/>
+    <!-- 行 4：类型青 + 数字黄绿 -->
+    <line x1="18" y1="44" x2="26" y2="44" stroke="#4EC9B0"/>
+    <line x1="29" y1="44" x2="34" y2="44" stroke="#B5CEA8"/>
+    <line x1="37" y1="44" x2="43" y2="44" stroke="#D4D4D4"/>
+    <!-- 行 5：普通文本 -->
+    <line x1="18" y1="52" x2="38" y2="52" stroke="#D4D4D4"/>
+  </g>
+
+  <!-- 高亮光标点睛：闪烁光标竖线 -->
+  <rect x="41" y="49.5" width="2.2" height="5" rx="1" fill="#FFFFFF"/>
+</svg>
