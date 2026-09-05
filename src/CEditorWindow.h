@@ -36,6 +36,10 @@ public:
     BOOL OpenFile(LPCWSTR szPath);
     BOOL SaveFile(LPCWSTR szPath);   // 保存到指定路径（编码 = 打开时检测或用户设定）
 
+    // 该文件已被任一实例窗口打开时，激活（恢复+置前）那个窗口并返回 true（含本窗口）。
+    // 供启动入口与"打开"对话框去重使用
+    static bool ActivateExistingForFile(LPCWSTR szPath);
+
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -89,6 +93,9 @@ private:
     void ChangeFontSize(float delta); // 字号增减（delta=0 重置为 14）
     void LoadSettings();              // 启动时从 %APPDATA%\TextEditor\settings.ini 读取
     void SaveSettings();              // 任一设置变化时写回
+
+    // ---- 多实例去重 ----
+    bool  OnFileActivateCopyData(LPARAM lParam);  // WM_COPYDATA：查询的文件已在本窗口打开则置前自己
 
     // ---- 命中测试 / IME ----
     bool  HitTestClient(int x, int y, DWORD* pRow, DWORD* pCol); // false = 最后一行之下的空白

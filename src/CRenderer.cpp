@@ -257,6 +257,10 @@ void CRenderer::RebuildTextFormats()
             m_fontSize, locale, &m_pTextFormat)))
         return;
 
+    // 制表位宽度 = 4 em（等宽字体下即 4 字符一跳，与记事本/常规编辑器一致）。
+    // 显式设置使 \t 的前进宽度不依赖系统默认值
+    m_pTextFormat->SetIncrementalTabStop(m_fontSize * 4.0f);
+
     // Emoji 专用格式（彩色字形）
     m_pDWriteFactory->CreateTextFormat(
         L"Segoe UI Emoji", nullptr,

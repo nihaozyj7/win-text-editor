@@ -17,19 +17,28 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
         return 1;
 
     int exitCode = 0;
+
+    // 命令行第一参数作为要打开的文件路径
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    LPCWSTR fileArg = (argv && argc > 1) ? argv[1] : nullptr;
+
+    // 该文件已被其他实例打开 → 激活已有窗口并直接退出，不重复打开。
+    // 必须在创建窗口前判定，避免新空窗口闪现
+    if (fileArg && CEditorWindow::ActivateExistingForFile(fileArg))
+    {
+        if (argv)
+            LocalFree(argv);
+        CoUninitialize();
+        return 0;
+    }
+
     {
         CEditorWindow window;
         if (window.Create(hInstance, nCmdShow))
         {
-            // 命令行第一参数作为要打开的文件路径
-            int argc = 0;
-            LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-            if (argv)
-            {
-                if (argc > 1)
-                    window.OpenFile(argv[1]);
-                LocalFree(argv);
-            }
+            if (fileArg)
+                window.OpenFile(fileArg);
             exitCode = window.Run();
         }
         else
@@ -38,6 +47,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
         }
     }
 
+    if (argv)
+        LocalFree(argv);
     CoUninitialize();
     return exitCode;
 }

@@ -61,6 +61,9 @@ namespace
     constexpr UINT_PTR kCaretTimer = 1;
     constexpr UINT      kCaretBlinkMs = 530;
 
+    // 多实例去重：WM_COPYDATA 查询"该文件是否已打开"的魔数标记（过滤外来消息）
+    constexpr ULONG_PTR kFileActivateTag = 0x54455831;   // 'TEX1'
+
     // 光标行视觉高度累计的扫描上限（行数/字符预算），超过则走快速跳转路径
     constexpr DWORD kVisualScanMaxRows = 120;
     constexpr int   kVisualScanCharBudget = 4 * 1024 * 1024;
@@ -147,6 +150,53 @@ namespace
         wchar_t cls[64]{};
         if (GetClassNameW(hwnd, cls, 64) && wcscmp(cls, kWindowClassName) == 0)
             ++*reinterpret_cast<int*>(lp);
+        return TRUE;
+    }
+
+    // ---- 多实例去重：判定"同一文件"并激活已打开它的窗口 ----
+
+    // 路径规范化（展开相对路径 + 忽略大小写），用于同一文件判定。
+    // 不解析符号链接/8.3 短名；资源管理器与打开对话框给出的都是绝对长路径
+    std::wstring NormalizePathForCompare(const std::wstring& path)
+    {
+        wchar_t buf[32768]{};
+        DWORD n = GetFullPathNameW(path.c_str(), 32768, buf, nullptr);
+        if (n == 0 || n >= 32768)
+            return path;
+        CharLowerBuffW(buf, n);
+        return std::wstring(buf, n);
+    }
+
+    struct FileActivateEnumCtx
+    {
+        const std::wstring* path;   // 待查文件（原始路径）
+        HWND found;                 // 已打开该文件的窗口
+    };
+
+    // 枚举回调：向每个同类可见窗口转发 WM_COPYDATA 查询，有窗口认领即停
+    BOOL CALLBACK FindWindowWithFileWndProc(HWND hwnd, LPARAM lp)
+    {
+        auto* ctx = reinterpret_cast<FileActivateEnumCtx*>(lp);
+        wchar_t cls[64]{};
+        if (!GetClassNameW(hwnd, cls, 64) || wcscmp(cls, kWindowClassName) != 0)
+            return TRUE;
+        if (!IsWindowVisible(hwnd))   // 正在销毁/隐藏的窗口不参与
+            return TRUE;
+
+        // 传原始路径，由目标进程自行规范化比对（路径数据在对方进程里）
+        COPYDATASTRUCT cds{};
+        cds.dwData = kFileActivateTag;
+        cds.cbData = static_cast<DWORD>((ctx->path->size() + 1) * sizeof(wchar_t));
+        cds.lpData = const_cast<wchar_t*>(ctx->path->c_str());
+
+        DWORD_PTR claimed = 0;
+        // SMTO_ABORTIFHUNG：目标进程挂死时不拖住发起方
+        if (SendMessageTimeoutW(hwnd, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cds),
+                                SMTO_ABORTIFHUNG, 2000, &claimed) && claimed)
+        {
+            ctx->found = hwnd;
+            return FALSE;
+        }
         return TRUE;
     }
 
@@ -292,7 +342,8 @@ void CEditorWindow::RegisterWindowClass(HINSTANCE hInstance)
     // 加载 resources/editor.rc 中嵌入的应用图标（ID=1），标题栏/任务栏/Alt+Tab 均显示
     wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
     wc.hIconSm       = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
-    wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+    // 编辑区显示文本 I 形光标（滚动条/状态栏为子窗口，仍用各自类光标箭头）
+    wc.hCursor       = LoadCursorW(nullptr, IDC_IBEAM);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = kWindowClassName;
 
@@ -594,6 +645,12 @@ LRESULT CEditorWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         // 中文 IME：组合开始/进行中把组合窗口锚定到光标位置
         UpdateImeCompositionWindow();
         break;   // 继续交给 DefWindowProc 让默认 IME UI 正常工作
+
+    case WM_COPYDATA:
+        // 其他实例查询某文件是否已在本窗口打开：命中则置前自己并回 TRUE
+        if (OnFileActivateCopyData(lParam))
+            return TRUE;
+        break;
 
     case WM_SETTINGCHANGE:
         // 系统主题切换（跟随系统模式下生效）
@@ -1129,6 +1186,50 @@ void CEditorWindow::RebuildDocument()
     BumpVisualEpoch();
 }
 
+// ---------------- 多实例去重 ----------------
+
+// 查询该文件是否已被某个实例窗口打开：命中则激活那个窗口并返回 true
+bool CEditorWindow::ActivateExistingForFile(LPCWSTR szPath)
+{
+    if (!szPath || !szPath[0])
+        return false;
+
+    std::wstring path = szPath;
+    FileActivateEnumCtx ctx{ &path, nullptr };
+    EnumWindows(FindWindowWithFileWndProc, reinterpret_cast<LPARAM>(&ctx));
+    if (!ctx.found)
+        return false;
+
+    // 恢复并置前。刚由用户操作（如资源管理器双击）启动的进程拥有前台激活
+    // 权限，由它置前最可靠；目标进程收到查询时也会自行尝试作兜底
+    if (IsIconic(ctx.found))
+        ShowWindow(ctx.found, SW_RESTORE);
+    SetForegroundWindow(ctx.found);
+    return true;
+}
+
+// WM_COPYDATA 查询处理：文件已在本窗口打开则置前自己并返回 true
+bool CEditorWindow::OnFileActivateCopyData(LPARAM lParam)
+{
+    auto* pcs = reinterpret_cast<COPYDATASTRUCT*>(lParam);
+    if (!pcs || pcs->dwData != kFileActivateTag || !pcs->lpData ||
+        pcs->cbData < sizeof(wchar_t) || pcs->cbData % sizeof(wchar_t) != 0)
+        return false;
+    if (m_filePath.empty())
+        return false;
+
+    size_t chars = pcs->cbData / sizeof(wchar_t);
+    std::wstring incoming(static_cast<const wchar_t*>(pcs->lpData), chars - 1);
+
+    if (NormalizePathForCompare(incoming) != NormalizePathForCompare(m_filePath))
+        return false;
+
+    if (IsIconic(m_hwnd))
+        ShowWindow(m_hwnd, SW_RESTORE);
+    SetForegroundWindow(m_hwnd);
+    return true;
+}
+
 BOOL CEditorWindow::OpenFile(LPCWSTR szPath)
 {
     // 新建空白文档
@@ -1149,6 +1250,10 @@ BOOL CEditorWindow::OpenFile(LPCWSTR szPath)
         InvalidateEditor();
         return TRUE;
     }
+
+    // 该文件已在某个窗口（含本窗口）打开 → 聚焦那个窗口，不重复打开
+    if (ActivateExistingForFile(szPath))
+        return TRUE;
 
     auto buf = std::make_unique<CTextBuffer>();
     if (!buf->OpenFile(szPath))
@@ -2891,8 +2996,8 @@ void CEditorWindow::OnChar(wchar_t ch)
     if (!m_lineIndex.IsValid())
         return;
 
-    // 忽略控制字符（Backspace 等在 OnKeyDown 处理）
-    if (ch < 0x20 && ch != L'\r')
+    // 忽略控制字符（Backspace 等在 OnKeyDown 处理）；\t 制表符与 \r 换行例外
+    if (ch < 0x20 && ch != L'\r' && ch != L'\t')
         return;
 
     if (ch == L'\r')
