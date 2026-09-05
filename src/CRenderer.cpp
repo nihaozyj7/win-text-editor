@@ -27,6 +27,8 @@ CRenderer::CRenderer()
     , m_pEmojiFormat(nullptr)
     , m_pGutterFormat(nullptr)
     , m_pTextBrush(nullptr)
+    , m_pTokBrush{}
+
     , m_pBackgroundBrush(nullptr)
     , m_pCaretBrush(nullptr)
     , m_pSelectionBrush(nullptr)
@@ -71,6 +73,10 @@ void CRenderer::CreateThemeBrushes()
         return;   // RT 重建时按当前 m_dark 创建
 
     if (m_pTextBrush)      { m_pTextBrush->Release();      m_pTextBrush = nullptr; }
+    for (auto& b : m_pTokBrush)
+    {
+        if (b) { b->Release(); b = nullptr; }
+    }
     if (m_pBackgroundBrush){ m_pBackgroundBrush->Release(); m_pBackgroundBrush = nullptr; }
     if (m_pCaretBrush)     { m_pCaretBrush->Release();     m_pCaretBrush = nullptr; }
     if (m_pSelectionBrush) { m_pSelectionBrush->Release(); m_pSelectionBrush = nullptr; }
@@ -102,6 +108,50 @@ void CRenderer::CreateThemeBrushes()
     }
     // 滚动条滑块颜色随状态变化，用 SetColor 就地改色（浅/深各三档）
     m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.757f, 0.757f, 0.757f), &m_pScrollbarBrush);
+
+    // 语法着色画刷（按 TokKind 下标；配色对齐 VS Code 深色/浅色主题）
+    struct TokColor { float r, g, b; };
+    static const TokColor kDark[static_cast<int>(TokKind::Count)] = {
+        {},                                       // Plain（用正文画刷）
+        { 0.337f, 0.612f, 0.839f },               // Keyword  #569CD6
+        { 0.306f, 0.788f, 0.690f },               // Type     #4EC9B0
+        { 0.808f, 0.569f, 0.471f },               // String   #CE9178
+        { 0.416f, 0.600f, 0.333f },               // Comment  #6A9955
+        { 0.710f, 0.808f, 0.659f },               // Number   #B5CEA8
+        { 0.773f, 0.525f, 0.753f },               // Preproc  #C586C0
+        { 0.337f, 0.612f, 0.839f },               // Heading  #569CD6
+        { 0.416f, 0.600f, 0.333f },               // Quote    #6A9955
+        { 0.843f, 0.729f, 0.490f },               // Marker   #D7BA7D
+        { 0.808f, 0.569f, 0.471f },               // Code     #CE9178
+        { 0.216f, 0.580f, 1.000f },               // Link     #3794FF
+        { 0.957f, 0.529f, 0.443f },               // Error    #F48771
+        { 0.800f, 0.655f, 0.000f },               // Warn     #CCA700
+        { 0.612f, 0.804f, 0.996f },               // Timestamp#9CDCFE
+    };
+    static const TokColor kLight[static_cast<int>(TokKind::Count)] = {
+        {},                                       // Plain
+        { 0.000f, 0.000f, 1.000f },               // Keyword  #0000FF
+        { 0.149f, 0.498f, 0.600f },               // Type     #267F99
+        { 0.639f, 0.086f, 0.082f },               // String   #A31515
+        { 0.000f, 0.502f, 0.000f },               // Comment  #008000
+        { 0.035f, 0.525f, 0.345f },               // Number   #098658
+        { 0.686f, 0.000f, 0.859f },               // Preproc  #AF00DB
+        { 0.016f, 0.318f, 0.647f },               // Heading  #0451A5
+        { 0.000f, 0.502f, 0.000f },               // Quote    #008000
+        { 0.475f, 0.369f, 0.149f },               // Marker   #795E26
+        { 0.639f, 0.086f, 0.082f },               // Code     #A31515
+        { 0.000f, 0.416f, 0.694f },               // Link     #006AB1
+        { 0.804f, 0.192f, 0.192f },               // Error    #CD3131
+        { 0.749f, 0.529f, 0.012f },               // Warn     #BF8803
+        { 0.035f, 0.525f, 0.345f },               // Timestamp#098658
+    };
+    const TokColor* pal = m_dark ? kDark : kLight;
+    for (int k = 1; k < static_cast<int>(TokKind::Count); ++k)
+    {
+        if (!m_pTokBrush[k])
+            m_pRT->CreateSolidColorBrush(
+                D2D1::ColorF(pal[k].r, pal[k].g, pal[k].b), &m_pTokBrush[k]);
+    }
 }
 
 HRESULT CRenderer::CreateDeviceResources()
@@ -158,6 +208,10 @@ void CRenderer::ReleaseTextObjects()
     if (m_pSystemFallback)   { m_pSystemFallback->Release();   m_pSystemFallback = nullptr; }
     if (m_pDWriteFactory2)   { m_pDWriteFactory2->Release();   m_pDWriteFactory2 = nullptr; }
     if (m_pCaretBrush)       { m_pCaretBrush->Release();       m_pCaretBrush = nullptr; }
+    for (auto& b : m_pTokBrush)
+    {
+        if (b) { b->Release(); b = nullptr; }
+    }
     if (m_pSelectionBrush)   { m_pSelectionBrush->Release();   m_pSelectionBrush = nullptr; }
     if (m_pGutterBgBrush)    { m_pGutterBgBrush->Release();    m_pGutterBgBrush = nullptr; }
     if (m_pGutterTextBrush)  { m_pGutterTextBrush->Release();  m_pGutterTextBrush = nullptr; }
@@ -609,9 +663,62 @@ void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, float textA
             }
         }
 
-        m_pRT->DrawTextLayout(
-            D2D1::Point2F(originX, y), pLayout, m_pTextBrush,
-            D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        // 语法着色：按 token 区间分段裁剪整行 layout 绘制（每个像素只画一次，
+        // 颜色来自该段画刷）。走 DrawTextLayout 保留 Emoji 彩色字形能力。
+        // 超长行的 token 数过多时退回整行单色，避免每帧大量裁剪绘制
+        if (row.tokens.empty() || row.tokens.size() > 64)
+        {
+            m_pRT->DrawTextLayout(
+                D2D1::Point2F(originX, y), pLayout, m_pTextBrush,
+                D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        }
+        else
+        {
+            const UINT32 lineLen = static_cast<UINT32>(row.text.size());
+            auto drawRun = [&](uint32_t s, uint32_t e, TokKind kind)
+            {
+                if (e <= s)
+                    return;
+                ID2D1Brush* brush = m_pTextBrush;
+                int k = static_cast<int>(kind);
+                if (k > 0 && k < static_cast<int>(TokKind::Count) && m_pTokBrush[k])
+                    brush = m_pTokBrush[k];
+
+                UINT32 maxHits = (e - s) + 1;
+                std::vector<DWRITE_HIT_TEST_METRICS> hits(maxHits);
+                UINT32 hitCount = 0;
+                if (FAILED(pLayout->HitTestTextRange(s, e - s, originX, y,
+                                                     hits.data(), maxHits, &hitCount)))
+                    return;
+                if (hitCount > maxHits)
+                    hitCount = maxHits;
+                for (UINT32 h = 0; h < hitCount; ++h)
+                {
+                    m_pRT->PushAxisAlignedClip(
+                        D2D1::RectF(hits[h].left, hits[h].top,
+                                    hits[h].left + hits[h].width,
+                                    hits[h].top + hits[h].height),
+                        D2D1_ANTIALIAS_MODE_ALIASED);
+                    m_pRT->DrawTextLayout(
+                        D2D1::Point2F(originX, y), pLayout, brush,
+                        D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+                    m_pRT->PopAxisAlignedClip();
+                }
+            };
+
+            uint32_t pos = 0;
+            for (const Token& t : row.tokens)
+            {
+                uint32_t s = std::min<uint32_t>(t.start, lineLen);
+                uint32_t e = std::min<uint32_t>(t.start + t.len, lineLen);
+                if (s > pos)
+                    drawRun(pos, s, TokKind::Plain);   // token 之间的间隙
+                drawRun(s, e, t.kind);
+                pos = std::max(pos, e);
+            }
+            if (pos < lineLen)
+                drawRun(pos, lineLen, TokKind::Plain);
+        }
 
         // 行号数字（右对齐于行号栏内）
         if (m_showLineNumbers && gutterW > 0.0f && m_pGutterFormat)

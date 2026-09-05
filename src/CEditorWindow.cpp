@@ -1250,6 +1250,9 @@ void CEditorWindow::RebuildDocument()
     }
     m_maxLineWidth = 0.0f;
     m_hScrollPos = 0.0f;
+    // 语言按扩展名重检测；词法状态缓存全量失效
+    m_lang = Highlighter::DetectByExtension(m_filePath);
+    ClearHighlightCache();
     BumpVisualEpoch();
 }
 
@@ -1809,9 +1812,48 @@ void CEditorWindow::BuildVisibleRows(std::vector<CRenderer::Row>& rows) const
         r.text = vr.text;
         r.yTop = y;
         r.visualLines = vr.visualLines;
+        if (m_lang != Lang::None)
+        {
+            uint32_t st = StateBeforeLine(row);
+            Highlighter::LexLine(m_lang, r.text, st, r.tokens, st);
+        }
         y += static_cast<float>(r.visualLines) * lineH;
         rows.push_back(std::move(r));
     }
+}
+
+// ---- 语法高亮状态缓存 ----
+
+uint32_t CEditorWindow::StateAfterLine(DWORD row) const
+{
+    while (m_hlStatesValid <= row)
+    {
+        size_t i = m_hlStatesValid;
+        uint32_t st = (i > 0) ? m_hlStates[i - 1] : 0;
+        std::vector<Token> scratch;   // 只取行末状态，token 丢弃
+        Highlighter::LexLine(m_lang, GetLineText(static_cast<DWORD>(i)), st,
+                             scratch, st);
+        m_hlStates.push_back(st);
+        ++m_hlStatesValid;
+    }
+    return m_hlStates[row];
+}
+
+uint32_t CEditorWindow::StateBeforeLine(DWORD row) const
+{
+    return (row == 0) ? 0 : StateAfterLine(row - 1);
+}
+
+void CEditorWindow::InvalidateHighlightFrom(DWORD line)
+{
+    if (m_hlStatesValid > line)
+        m_hlStatesValid = line;   // 前缀状态仍有效，只收缩有效区
+}
+
+void CEditorWindow::ClearHighlightCache()
+{
+    m_hlStates.clear();
+    m_hlStatesValid = 0;
 }
 
 void CEditorWindow::OnPaint()
@@ -2497,6 +2539,7 @@ void CEditorWindow::InsertTextAtCaret(const std::wstring& text)
     int64_t lineDelta = breaks;
     m_lineIndex.NotifyEditRange(ofs, ofs,
                                 static_cast<int64_t>(bytes.size()), lineDelta);
+    InvalidateHighlightFrom(m_caretRow);   // 自插入行起词法状态失效（前缀不变）
     BumpVisualEpoch();
 
     // 光标移动到插入文本之后
@@ -2571,6 +2614,7 @@ void CEditorWindow::DeleteRange(DWORD startRow, DWORD startCol, DWORD endRow, DW
     m_lineIndex.NotifyEditRange(startByte, endByte,
                                 -static_cast<int64_t>(len),
                                 -static_cast<int64_t>(rowCount));
+    InvalidateHighlightFrom(startRow);
     BumpVisualEpoch();
 
     // 光标回到删除起点
@@ -2653,6 +2697,7 @@ void CEditorWindow::Undo()
                 return DocRead(o, d, m);
             },
             m_piece.Size(), m_encoding);
+        ClearHighlightCache();
         ByteToPos(ofs, &m_caretRow, &m_caretCol);
         m_selAnchorValid = false;
         m_selCaretRow = m_caretRow;
@@ -2675,6 +2720,7 @@ void CEditorWindow::Redo()
                 return DocRead(o, d, m);
             },
             m_piece.Size(), m_encoding);
+        ClearHighlightCache();
         ByteToPos(ofs, &m_caretRow, &m_caretCol);
         m_selAnchorValid = false;
         m_selCaretRow = m_caretRow;

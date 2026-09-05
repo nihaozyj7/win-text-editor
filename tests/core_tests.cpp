@@ -8,6 +8,7 @@
 #include "../src/PieceTable.h"
 #include "../src/Encoding.h"
 #include "../src/CLineIndex.h"
+#include "../src/Highlighter.h"
 
 static int g_failures = 0;
 

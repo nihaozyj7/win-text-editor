@@ -7,6 +7,7 @@
 #include "PieceTable.h"
 #include "CLineIndex.h"
 #include "CRenderer.h"
+#include "Highlighter.h"
 
 // 编辑器内容区内边距（文本区与窗口边缘的距离，像素）
 struct EditorPadding
@@ -173,6 +174,14 @@ private:
     const VisualRow& VisualRowOf(DWORD row) const;
     UINT RowVisualCount(DWORD row) const;
 
+    // ---- 语法高亮：行词法状态缓存 ----
+    // m_hlStates[i] = 第 i 行结束时的词法状态（m_hlStatesValid 条有效）。
+    // 编辑只从改动行起失效（前缀状态不变），避免大文件每次按键全量重扫
+    uint32_t StateAfterLine(DWORD row) const;    // 确保缓存覆盖到 row 并返回该行末状态
+    uint32_t StateBeforeLine(DWORD row) const;   // 该行开始时的状态
+    void InvalidateHighlightFrom(DWORD line);    // 自 line 起状态失效（编辑钩子）
+    void ClearHighlightCache();                  // 撤销/重做/换文件等全量失效
+
 private:
     HINSTANCE m_hInstance;
     HWND      m_hwnd;
@@ -225,6 +234,11 @@ private:
     mutable std::unordered_map<DWORD, VisualRow> m_visualCache;
     mutable uint64_t m_visualEpochSeen;  // 缓存对应的数据代
     uint64_t         m_visualEpoch;      // 当前数据代（编辑/设置/尺寸变化 +1）
+
+    // ---- 语法高亮（mutable：只读绘制路径 BuildVisibleRows 中惰性扩展）----
+    Lang m_lang = Lang::None;                       // 按扩展名检测；None 不高亮
+    mutable std::vector<uint32_t> m_hlStates;       // 行末词法状态缓存
+    mutable size_t m_hlStatesValid = 0;             // 有效条数
 
     // ---- 状态栏 owner-draw ----
     std::wstring m_statusText[4];

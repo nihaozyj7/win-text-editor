@@ -5,6 +5,7 @@
 #include <dwrite_2.h>
 #include <string>
 #include <vector>
+#include "Highlighter.h"
 
 // D2D/DWrite 渲染器：HwndRenderTarget 生命周期 + 可见行文本绘制
 // 输入仅为"可见行列表"（由调用方按需解码），天然满足大文件虚拟滚动
@@ -19,6 +20,7 @@ public:
         DWORD        row;       // 逻辑行号（用于光标命中判断）
         float        yTop;      // 本逻辑行首条视觉线的 y 坐标（含内边距/换行累计）
         UINT         visualLines;  // 自动换行后占用的视觉行数（≥1）
+        std::vector<Token> tokens; // 语法着色 token（空 = 整行按正文色绘制）
     };
 
     struct Selection
@@ -126,6 +128,7 @@ private:
     IDWriteTextFormat*     m_pEmojiFormat;      // Segoe UI Emoji 格式（保证彩色）
     IDWriteTextFormat*     m_pGutterFormat;     // 行号数字格式（右对齐）
     ID2D1SolidColorBrush*  m_pTextBrush;
+    ID2D1SolidColorBrush*  m_pTokBrush[static_cast<int>(TokKind::Count)]; // 语法着色（按 TokKind 下标，随主题）
     ID2D1SolidColorBrush*  m_pBackgroundBrush;
     ID2D1SolidColorBrush*  m_pCaretBrush;
     ID2D1SolidColorBrush*  m_pSelectionBrush;

@@ -22,6 +22,7 @@ set(SRC_LIST
     src/Encoding.cpp
     src/CLineIndex.cpp
     src/CRenderer.cpp
+    src/Highlighter.cpp
     src/PieceTable.cpp
 )
 
@@ -62,6 +63,7 @@ add_executable(core_tests
     src/PieceTable.cpp
     src/Encoding.cpp
     src/CLineIndex.cpp
+    src/Highlighter.cpp
 )
 target_compile_definitions(core_tests PRIVATE UNICODE _UNICODE)
 target_compile_options(core_tests PRIVATE
