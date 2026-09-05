@@ -7,7 +7,6 @@ build/
 big_*.txt
 test_*.txt
 *.log
-*.png
 # 临时/插件目录
 .video_agent/
 _smoke_test.txt
