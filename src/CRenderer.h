@@ -30,6 +30,16 @@ public:
         DWORD endCol;
     };
 
+    // 自定义滚动条几何（客户区坐标；由窗口层计算，渲染层只管画）
+    struct ScrollbarDraw
+    {
+        bool visible = false;
+        bool hovered = false;   // 悬停加深
+        bool dragged = false;   // 拖拽中最深
+        D2D1_RECT_F track{ 0, 0, 0, 0 };   // 整条轨道（供命中测试/布局参考）
+        D2D1_RECT_F thumb{ 0, 0, 0, 0 };   // 滑块（圆角矩形）
+    };
+
     CRenderer();
     ~CRenderer();
 
@@ -56,10 +66,16 @@ public:
     // textAreaWidth：文本排版可用宽度（去掉内边距/行号栏）
     // originX：文本绘制原点 x（含内边距/行号栏，以及水平滚动偏移）
     // pMaxRowWidth：输出本帧最宽一行的像素宽度（水平滚动范围用，可为 null）
+    // vBar/hBar：自定义滚动条几何（visible=false 跳过绘制）
     void Render(const std::vector<Row>& rows, int lineHeight, float textAreaWidth,
                 float clientHeight, float originX,
                 DWORD caretRow, DWORD caretCol, bool caretVisible,
-                const Selection& sel, float* pMaxRowWidth);
+                const Selection& sel, float* pMaxRowWidth,
+                const ScrollbarDraw* vBar = nullptr,
+                const ScrollbarDraw* hBar = nullptr);
+
+    // 窗口 DPI 变化后同步 render target 的 DPI（DIP→物理像素换算）
+    void UpdateDpi();
 
     // 反向解析点击位置；返回命中行的 (行号, UTF-16 列)
     // x 相对文本区左缘（调用方已减去内边距/行号栏并加回水平滚动），y 为客户区绝对坐标
@@ -80,11 +96,15 @@ private:
     void    ReleaseDeviceResources();
     void    ReleaseTextObjects();
     void    CreateThemeBrushes();
+    // 画单条滚动条滑块（圆角、随主题/悬停/拖拽着色）
+    void    DrawScrollbar(const ScrollbarDraw& sb);
 
     // 按 m_fontFamily / m_fontFallbackFamily 重建 TextFormat 与回退链
     void RebuildTextFormats();
     // 构建多字体顺序回退：拉丁区段→主字体，CJK 区段→回退字体，其余走系统回退
     void RebuildFallback();
+    // 行号格式行距与正文对齐（均匀行距 + 80% 基线），行高变化后需重调
+    void ApplyGutterSpacing();
 
     // 创建某一行 text layout（调用方负责 Release）；应用行距/换行模式/字体回退
     IDWriteTextLayout* CreateLayoutForRow(const wchar_t* text, UINT32 len,
@@ -112,6 +132,7 @@ private:
     ID2D1SolidColorBrush*  m_pGutterBgBrush;
     ID2D1SolidColorBrush*  m_pGutterTextBrush;
     ID2D1SolidColorBrush*  m_pGutterLineBrush;
+    ID2D1SolidColorBrush*  m_pScrollbarBrush;
 
     float m_lineHeight;
     float m_lineHeightFactor;   // 行高 = 字号 × factor

@@ -33,6 +33,7 @@ CRenderer::CRenderer()
     , m_pGutterBgBrush(nullptr)
     , m_pGutterTextBrush(nullptr)
     , m_pGutterLineBrush(nullptr)
+    , m_pScrollbarBrush(nullptr)
     , m_lineHeight(20.0f)
     , m_lineHeightFactor(1.2f)
     , m_fontFamily(L"Consolas")
@@ -99,6 +100,8 @@ void CRenderer::CreateThemeBrushes()
         m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.463f, 0.463f, 0.463f), &m_pGutterTextBrush);    // #767676
         m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.851f, 0.851f, 0.851f), &m_pGutterLineBrush);    // #D9D9D9
     }
+    // 滚动条滑块颜色随状态变化，用 SetColor 就地改色（浅/深各三档）
+    m_pRT->CreateSolidColorBrush(D2D1::ColorF(0.757f, 0.757f, 0.757f), &m_pScrollbarBrush);
 }
 
 HRESULT CRenderer::CreateDeviceResources()
@@ -136,6 +139,8 @@ HRESULT CRenderer::CreateDeviceResources()
     if (FAILED(hr))
         return hr;
 
+    UpdateDpi();   // render target DPI 对齐窗口所在显示器
+
     RebuildTextFormats();
     CreateThemeBrushes();
 
@@ -157,6 +162,7 @@ void CRenderer::ReleaseTextObjects()
     if (m_pGutterBgBrush)    { m_pGutterBgBrush->Release();    m_pGutterBgBrush = nullptr; }
     if (m_pGutterTextBrush)  { m_pGutterTextBrush->Release();  m_pGutterTextBrush = nullptr; }
     if (m_pGutterLineBrush)  { m_pGutterLineBrush->Release();  m_pGutterLineBrush = nullptr; }
+    if (m_pScrollbarBrush)   { m_pScrollbarBrush->Release();   m_pScrollbarBrush = nullptr; }
     if (m_pBackgroundBrush)  { m_pBackgroundBrush->Release();  m_pBackgroundBrush = nullptr; }
     if (m_pTextBrush)        { m_pTextBrush->Release();        m_pTextBrush = nullptr; }
 }
@@ -174,6 +180,8 @@ HRESULT CRenderer::Resize()
     if (!m_pRT)
         return E_FAIL;
 
+    UpdateDpi();   // DPI 可能已随显示器/缩放变化，DIP→像素换算保持正确
+
     RECT rc;
     GetClientRect(m_hwnd, &rc);
     D2D1_SIZE_U size = D2D1::SizeU(
@@ -186,6 +194,29 @@ HRESULT CRenderer::Resize()
         hr = CreateDeviceResources();
     }
     return hr;
+}
+
+// 窗口所在显示器的当前 DPI（Per-Monitor V2 下每块屏/每次缩放都可能不同）；
+// GetDpiForWindow 需 Win10 1607+，老系统回退 96
+static float WindowDpi(HWND hwnd)
+{
+    using Fn = UINT(WINAPI*)(HWND);
+    static Fn getDpi = []() -> Fn {
+        HMODULE u32 = GetModuleHandleW(L"user32.dll");
+        return u32 ? reinterpret_cast<Fn>(GetProcAddress(u32, "GetDpiForWindow")) : nullptr;
+    }();
+    UINT dpi = getDpi ? getDpi(hwnd) : 96;
+    if (dpi == 0)
+        dpi = 96;
+    return static_cast<float>(dpi);
+}
+
+void CRenderer::UpdateDpi()
+{
+    if (!m_pRT || !m_hwnd)
+        return;
+    float dpi = WindowDpi(m_hwnd);
+    m_pRT->SetDpi(dpi, dpi);
 }
 
 float CRenderer::GetLineHeight() const
@@ -206,6 +237,7 @@ void CRenderer::SetLineHeightFactor(float factor)
         factor = 4.0f;
     m_lineHeightFactor = factor;
     m_lineHeight = m_fontSize * m_lineHeightFactor;
+    ApplyGutterSpacing();   // 行高变了，行号行距同步
 }
 
 void CRenderer::SetFontSize(float size)
@@ -267,14 +299,26 @@ void CRenderer::RebuildTextFormats()
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         m_fontSize, locale, &m_pEmojiFormat);
 
-    // 行号数字格式（右对齐）
+    // 行号数字格式（右对齐；行距与正文一致，见 ApplyGutterSpacing）
     if (SUCCEEDED(m_pDWriteFactory->CreateTextFormat(
             m_fontFamily.c_str(), nullptr,
             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
             m_fontSize, locale, &m_pGutterFormat)))
+    {
         m_pGutterFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+        ApplyGutterSpacing();
+    }
 
     RebuildFallback();
+}
+
+// 行号与正文同一基线：正文 layout 用均匀行距(基线 80% 行高)，
+// 行号若用默认行距会差 1~2px 导致上下错位，这里强制对齐
+void CRenderer::ApplyGutterSpacing()
+{
+    if (m_pGutterFormat)
+        m_pGutterFormat->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,
+                                        m_lineHeight, m_lineHeight * BaselineRatio());
 }
 
 void CRenderer::RebuildFallback()
@@ -462,7 +506,8 @@ bool CRenderer::GetCaretPoint(const std::wstring& text, DWORD col, float maxWidt
 void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, float textAreaWidth,
                        float clientHeight, float originX,
                        DWORD caretRow, DWORD caretCol, bool caretVisible,
-                       const Selection& sel, float* pMaxRowWidth)
+                       const Selection& sel, float* pMaxRowWidth,
+                       const ScrollbarDraw* vBar, const ScrollbarDraw* hBar)
 {
     if (!m_pRT)
         return;
@@ -601,9 +646,48 @@ void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, float textA
         pLayout->Release();
     }
 
+    // 自定义滚动条（最后画，覆盖在内容之上）
+    if (vBar)
+        DrawScrollbar(*vBar);
+    if (hBar)
+        DrawScrollbar(*hBar);
+
     HRESULT hrEnd = m_pRT->EndDraw();
     if (hrEnd == D2DERR_RECREATE_TARGET)
         Resize();
+}
+
+// 现代扁平风格滑块：无箭头、圆角、悬停/拖拽加深，颜色随主题
+void CRenderer::DrawScrollbar(const ScrollbarDraw& sb)
+{
+    if (!sb.visible || !m_pScrollbarBrush)
+        return;
+
+    float w = sb.thumb.right - sb.thumb.left;
+    float h = sb.thumb.bottom - sb.thumb.top;
+    if (w <= 0 || h <= 0)
+        return;
+
+    D2D1_COLOR_F color;
+    if (m_dark)
+    {
+        // 深色：#424242 → hover #686868 → drag #9B9B9B
+        color = sb.dragged ? D2D1::ColorF(0.608f, 0.608f, 0.608f)
+              : sb.hovered ? D2D1::ColorF(0.408f, 0.408f, 0.408f)
+                           : D2D1::ColorF(0.259f, 0.259f, 0.259f);
+    }
+    else
+    {
+        // 浅色：#C1C1C1 → hover #A8A8A8 → drag #787878
+        color = sb.dragged ? D2D1::ColorF(0.471f, 0.471f, 0.471f)
+              : sb.hovered ? D2D1::ColorF(0.659f, 0.659f, 0.659f)
+                           : D2D1::ColorF(0.757f, 0.757f, 0.757f);
+    }
+    m_pScrollbarBrush->SetColor(color);
+
+    float radius = (w < h ? w : h) * 0.5f;
+    D2D1_ROUNDED_RECT rr = { sb.thumb, radius, radius };
+    m_pRT->FillRoundedRectangle(rr, m_pScrollbarBrush);
 }
 
 bool CRenderer::HitTestPoint(const std::vector<Row>& rows, int lineHeight, float textAreaWidth,

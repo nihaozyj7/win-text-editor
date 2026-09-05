@@ -5,6 +5,30 @@
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
 {
+    // 高分屏/系统缩放：Per-Monitor V2（Win10 1703+），每块显示器独立 DPI，
+    // 窗口收到 WM_DPICHANGED 实时跟随；老系统回退系统级感知
+    {
+        using SetCtxFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+        HMODULE u32 = GetModuleHandleW(L"user32.dll");
+        auto setCtx = u32
+            ? reinterpret_cast<SetCtxFn>(GetProcAddress(u32, "SetProcessDpiAwarenessContext"))
+            : nullptr;
+        if (setCtx)
+        {
+            if (!setCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+                setCtx(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
+        }
+        else
+        {
+            // Vista+ 兜底：至少保证不模糊
+            using SetAwareFn = BOOL(WINAPI*)();
+            auto setAware = reinterpret_cast<SetAwareFn>(
+                GetProcAddress(u32, "SetProcessDPIAware"));
+            if (setAware)
+                setAware();
+        }
+    }
+
     // 初始化公共控件（状态栏需要）
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);

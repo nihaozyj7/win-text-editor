@@ -48,8 +48,6 @@ private:
     void OnResize();
     void OnCommand(WORD commandId);
     void OnPaint();
-    void OnScroll(WPARAM wParam, LPARAM lParam);
-    void OnHScroll(WPARAM wParam, LPARAM lParam);
     void OnMouseClick(WPARAM wParam, LPARAM lParam, UINT clickCount);
     void OnMouseDrag(LPARAM lParam);
     void OnKeyDown(WPARAM wParam);
@@ -63,6 +61,24 @@ private:
     bool SaveDocument();             // 保存当前文档（无路径时先弹另存为对话框）；失败/取消返回 false
     void UpdateScrollBar();
     void ScrollToLine(DWORD line);
+
+    // ---- 自定义滚动条（D2D 绘制，替代原生 SCROLLBAR 控件）----
+    float SbarWidth() const;                 // 滚动条厚度（像素，随 DPI 缩放）
+    bool  VScrollVisible() const;            // 内容高度 ≥ 视口 1.5 倍才显示
+    bool  InRect(const D2D1_RECT_F& r, const POINT& pt) const;
+    bool  OnScrollbarDown(int x, int y);     // 命中滚动条按下；处理拖拽/翻页，返回是否命中
+    void  OnScrollbarMove(int x, int y);     // 拖拽滑块 + 悬停着色
+    void  OnScrollbarUp();                   // 结束拖拽
+    void  SetHScrollPos(float px);           // 设置水平滚动位置（含钳制/刷新）
+    bool  m_mouseTracking = false;           // WM_MOUSELEAVE 跟踪标记（悬停态清除）
+    int   m_barDrag = 0;                     // 0 无 / 1 垂直滑块 / 2 水平滑块 / 3 垂直翻页 / 4 水平翻页
+    float m_barDragOfs = 0.0f;               // 按下点相对滑块顶/左缘的偏移
+    CRenderer::ScrollbarDraw m_vBar;         // 垂直条几何（窗口层计算，渲染层绘制）
+    CRenderer::ScrollbarDraw m_hBar;
+    int   m_vMax = 0;                        // 垂直可滚动行数上限（拖拽换算用）
+    int   m_vPage = 1;                       // 视口可容纳行数
+    float m_hMax = 0.0f;                     // 水平可滚动像素上限
+    float m_hPage = 1.0f;
     void MoveCaret(INT dRow, INT dCol, bool extendSelection);
     void MoveCaretTo(int row, int col, bool extendSelection);
     void EnsureCaretVisible(bool typingMode);
@@ -93,6 +109,10 @@ private:
     void ChangeFontSize(float delta); // 字号增减（delta=0 重置为 14）
     void LoadSettings();              // 启动时从 %APPDATA%\TextEditor\settings.ini 读取
     void SaveSettings();              // 任一设置变化时写回
+    void ApplyDpiScale();             // 按窗口所在显示器 DPI 换算渲染尺寸/内边距/状态栏字体
+    int  Scale(int v) const;          // 96-DPI 基准值 → 当前 DPI 像素
+    void UpdateStatusFont();          // 状态栏字体随 DPI 缩放
+    HFONT m_statusFont = nullptr;     // 状态栏使用的缩放字体
 
     // ---- 多实例去重 ----
     bool  OnFileActivateCopyData(LPARAM lParam);  // WM_COPYDATA：查询的文件已在本窗口打开则置前自己
@@ -157,9 +177,8 @@ private:
     HINSTANCE m_hInstance;
     HWND      m_hwnd;
     HWND      m_hStatusBar;
-    HWND      m_hVScroll;              // 垂直滚动条（编辑区子控件，不占状态栏行）
-    HWND      m_hHScroll;              // 水平滚动条（编辑区子控件）
     HMENU     m_hMenu;
+    float     m_dpiScale = 1.0f;       // 当前显示器 DPI / 96（Per-Monitor V2）
 
     std::unique_ptr<CTextBuffer> m_buffer;   // 原文件 MMF（只读原始字节）
     PieceTable m_piece;                      // 编辑模型（原文 + 追加）
