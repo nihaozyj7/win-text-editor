@@ -60,6 +60,11 @@ namespace
     constexpr UINT_PTR kCaretTimer = 1;
     constexpr UINT      kCaretBlinkMs = 530;
 
+    constexpr UINT_PTR kHlTimer = 2;
+    constexpr UINT      kHlTimerIntervalMs = 60;   // 补算定时器轮询间隔
+    constexpr ULONGLONG kHlScrollActiveMs = 80;    // 距上次滚动不足此时长视为滚动中（期间不渲染文本）
+    constexpr size_t    kHlMaxCatchUp = 2000;      // 单帧词法状态补算行数上限
+
     // 多实例去重：WM_COPYDATA 查询"该文件是否已打开"的魔数标记（过滤外来消息）
     constexpr ULONG_PTR kFileActivateTag = 0x54455831;   // 'TEX1'
 
@@ -698,6 +703,11 @@ LRESULT CEditorWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         return 0;
 
     case WM_TIMER:
+        if (wParam == kHlTimer)
+        {
+            OnHighlightRefreshTimer();
+            return 0;
+        }
         OnTimer();
         return 0;
 
@@ -2055,10 +2065,39 @@ void CEditorWindow::BuildVisibleRows(std::vector<CRenderer::Row>& rows) const
         r.text = vr.text;
         r.yTop = y;
         r.visualLines = vr.visualLines;
+        r.layoutKey = (m_visualEpoch << 32) | row;   // 数据代+行号，供 TextLayout 缓存
         if (m_lang != Lang::None)
         {
-            uint32_t st = StateBeforeLine(row);
-            Highlighter::LexLine(m_lang, r.text, st, r.tokens, st);
+            bool needSchedule = false;
+            if (vr.highlighted)
+            {
+                // token 缓存命中：直接复用，不再逐帧词法分析
+                r.tokens = vr.tokens;
+            }
+            else if (!ScrollActive())
+            {
+                uint32_t stIn = 0;
+                bool throttled = false;
+                stIn = StateBeforeLine(row, &throttled);
+                if (!throttled)
+                {
+                    Highlighter::LexLine(m_lang, r.text, stIn, r.tokens, stIn);
+                    VisualRow& mv = const_cast<VisualRow&>(vr);
+                    mv.tokens = r.tokens;
+                    mv.hlStateIn = stIn;
+                    mv.highlighted = true;
+                }
+                else
+                {
+                    needSchedule = true;   // 冷启动补算超限，停稳后再补
+                }
+            }
+            else
+            {
+                needSchedule = true;       // 滚动中：先纯文本渲染，停稳后补色
+            }
+            if (needSchedule)
+                ScheduleHighlightRefresh();
         }
         y += static_cast<float>(r.visualLines) * lineH;
         rows.push_back(std::move(r));
@@ -2067,24 +2106,95 @@ void CEditorWindow::BuildVisibleRows(std::vector<CRenderer::Row>& rows) const
 
 // ---- 语法高亮状态缓存 ----
 
-uint32_t CEditorWindow::StateAfterLine(DWORD row) const
+uint32_t CEditorWindow::StateAfterLine(DWORD row, size_t maxCatchUp,
+                                       bool* throttled) const
 {
+    if (throttled)
+        *throttled = false;
+    size_t budgetEnd = m_hlStatesValid + maxCatchUp;   // SIZE_MAX 时即无限制
     while (m_hlStatesValid <= row)
     {
+        if (m_hlStatesValid >= budgetEnd)
+        {
+            // 单帧补算超限：本轮放弃（缓存已部分推进），停稳后的
+            // 定时器回合会继续分帧补算，避免跳转单帧卡顿
+            if (throttled)
+                *throttled = true;
+            return 0;
+        }
         size_t i = m_hlStatesValid;
         uint32_t st = (i > 0) ? m_hlStates[i - 1] : 0;
+
+        // 顺序行游标取行文本：每次 GetLineText 都要从关键帧逐行回溯
+        // （逐行补算整体 O(n²)，大文件跳转卡死数秒），游标只定位一次
+        if (m_hlCursorRow != i)
+        {
+            m_hlCursor = m_lineIndex.CursorAt(i);
+            m_hlCursorRow = i;
+        }
+        std::wstring line;
+        uint64_t s = 0, e = 0;
+        if (m_lineIndex.CursorNext(m_hlCursor, &s, &e))
+        {
+            uint64_t len = e - s;
+            if (len > 1024 * 1024)
+                len = 1024 * 1024;   // 与 GetLineText 相同的防御性截断
+            if (len > 0)
+            {
+                std::vector<unsigned char> bytes(static_cast<size_t>(len));
+                DocRead(s, bytes.data(), len);
+                line = DecodeToWide(bytes.data(), static_cast<DWORD>(len), m_encoding);
+            }
+            ++m_hlCursorRow;
+        }
+        // 游标耗尽（文末空行等）：按空行处理，词法状态不变
+
         std::vector<Token> scratch;   // 只取行末状态，token 丢弃
-        Highlighter::LexLine(m_lang, GetLineText(static_cast<DWORD>(i)), st,
-                             scratch, st);
+        Highlighter::LexLine(m_lang, line, st, scratch, st);
         m_hlStates.push_back(st);
         ++m_hlStatesValid;
     }
     return m_hlStates[row];
 }
 
-uint32_t CEditorWindow::StateBeforeLine(DWORD row) const
+uint32_t CEditorWindow::StateBeforeLine(DWORD row, bool* throttled) const
 {
-    return (row == 0) ? 0 : StateAfterLine(row - 1);
+    if (row == 0)
+    {
+        if (throttled)
+            *throttled = false;
+        return 0;
+    }
+    return StateAfterLine(row - 1, kHlMaxCatchUp, throttled);
+}
+
+void CEditorWindow::NoteScrollActivity()
+{
+    m_lastScrollTick = GetTickCount64();
+}
+
+bool CEditorWindow::ScrollActive() const
+{
+    return (GetTickCount64() - m_lastScrollTick) < kHlScrollActiveMs;
+}
+
+void CEditorWindow::ScheduleHighlightRefresh() const
+{
+    if (m_hlRefreshTimerOn || !m_hwnd)
+        return;
+    if (SetTimer(m_hwnd, kHlTimer, kHlTimerIntervalMs, nullptr))
+        m_hlRefreshTimerOn = true;
+}
+
+void CEditorWindow::OnHighlightRefreshTimer()
+{
+    // 滚动仍在进行则继续等下一轮；停稳后补一次重绘并停表
+    if (ScrollActive())
+        return;
+    KillTimer(m_hwnd, kHlTimer);
+    m_hlRefreshTimerOn = false;
+    if (m_lang != Lang::None)
+        InvalidateEditor();   // 下一帧补算高亮（token 缓存只补未命中的行）
 }
 
 void CEditorWindow::InvalidateHighlightFrom(DWORD line)
@@ -2355,6 +2465,7 @@ void CEditorWindow::ScrollToLine(DWORD line)
     if (line != m_scrollLine)
     {
         m_scrollLine = line;
+        NoteScrollActivity();   // 标记滚动活跃：期间跳过词法分析，停稳后补色
         UpdateScrollBar();
         InvalidateEditor();
     }

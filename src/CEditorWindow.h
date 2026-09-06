@@ -167,18 +167,30 @@ private:
     // （编辑/设置/尺寸变化时代数 +1；滚动/移动光标不失效，避免每键重复解码与建 layout）
     struct VisualRow
     {
-        UINT         visualLines;
-        std::wstring text;
+        UINT               visualLines;
+        std::wstring       text;
+        // 语法着色 token 缓存：token 只依赖行文本 + 行首词法状态，
+        // 编辑/设置变化通过整代失效（BumpVisualEpoch）覆盖
+        std::vector<Token> tokens;
+        uint32_t           hlStateIn = 0;
+        bool               highlighted = false;
     };
     void BumpVisualEpoch();
     const VisualRow& VisualRowOf(DWORD row) const;
     UINT RowVisualCount(DWORD row) const;
 
+    // ---- 滚动活跃检测与高亮延迟补算 ----
+    void NoteScrollActivity();          // 滚动路径调用，刷新活跃时间戳
+    bool ScrollActive() const;          // 最近是否在快速滚动（期间跳过词法分析）
+    void ScheduleHighlightRefresh() const; // 启动补算定时器（已启动则忽略）
+    void OnHighlightRefreshTimer();     // 定时器：停稳后补一次高亮重绘
+
     // ---- 语法高亮：行词法状态缓存 ----
     // m_hlStates[i] = 第 i 行结束时的词法状态（m_hlStatesValid 条有效）。
     // 编辑只从改动行起失效（前缀状态不变），避免大文件每次按键全量重扫
-    uint32_t StateAfterLine(DWORD row) const;    // 确保缓存覆盖到 row 并返回该行末状态
-    uint32_t StateBeforeLine(DWORD row) const;   // 该行开始时的状态
+    uint32_t StateAfterLine(DWORD row, size_t maxCatchUp = SIZE_MAX,
+                            bool* throttled = nullptr) const;
+    uint32_t StateBeforeLine(DWORD row, bool* throttled = nullptr) const;
     void InvalidateHighlightFrom(DWORD line);    // 自 line 起状态失效（编辑钩子）
     void ClearHighlightCache();                  // 撤销/重做/换文件等全量失效
 
@@ -239,6 +251,10 @@ private:
     Lang m_lang = Lang::None;                       // 按扩展名检测；None 不高亮
     mutable std::vector<uint32_t> m_hlStates;       // 行末词法状态缓存
     mutable size_t m_hlStatesValid = 0;             // 有效条数
+    mutable CLineIndex::LineCursor m_hlCursor;      // 补算顺序游标（O(n) 逐行推进）
+    mutable size_t m_hlCursorRow = SIZE_MAX;        // 游标当前指向的行（与有效条数同步）
+    mutable ULONGLONG m_lastScrollTick = 0;         // 最近一次滚动的时刻（毫秒计数）
+    mutable bool m_hlRefreshTimerOn = false;        // 高亮补算定时器是否在跑
 
     // ---- 状态栏 owner-draw ----
     std::wstring m_statusText[4];

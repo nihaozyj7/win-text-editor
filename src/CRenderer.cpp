@@ -62,6 +62,12 @@ HRESULT CRenderer::Init(HWND hwnd)
 
 void CRenderer::Destroy()
 {
+    for (auto& kv : m_layoutCache)
+    {
+        if (kv.second.pLayout)
+            kv.second.pLayout->Release();
+    }
+    m_layoutCache.clear();
     ReleaseTextObjects();
     ReleaseDeviceResources();
     m_hwnd = nullptr;
@@ -557,6 +563,60 @@ bool CRenderer::GetCaretPoint(const std::wstring& text, DWORD col, float maxWidt
     return true;
 }
 
+IDWriteTextLayout* CRenderer::AcquireCachedLayout(const Row& row, float maxWidth)
+{
+    auto it = m_layoutCache.find(row.row);
+    if (it != m_layoutCache.end() && it->second.key == row.layoutKey &&
+        it->second.maxWidth == maxWidth && it->second.pLayout)
+    {
+        it->second.used = true;
+        it->second.pLayout->AddRef();
+        return it->second.pLayout;
+    }
+
+    IDWriteTextLayout* pLayout = CreateLayoutForRow(
+        row.text.c_str(), static_cast<UINT32>(row.text.size()), maxWidth);
+    if (!pLayout)
+        return nullptr;
+    ApplyEmojiFontMapping(pLayout, row.text.c_str(),
+                          static_cast<UINT32>(row.text.size()));
+
+    LayoutCacheEntry entry;
+    entry.pLayout = pLayout;
+    entry.key = row.layoutKey;
+    entry.maxWidth = maxWidth;
+    entry.used = true;
+    if (it != m_layoutCache.end())
+    {
+        it->second.pLayout->Release();
+        it->second = entry;
+    }
+    else
+    {
+        m_layoutCache.emplace(row.row, entry);
+    }
+    pLayout->AddRef();   // 一份归缓存，一份归调用方
+    return pLayout;
+}
+
+void CRenderer::PurgeStaleLayouts()
+{
+    for (auto it = m_layoutCache.begin(); it != m_layoutCache.end(); )
+    {
+        if (!it->second.used)
+        {
+            if (it->second.pLayout)
+                it->second.pLayout->Release();
+            it = m_layoutCache.erase(it);
+        }
+        else
+        {
+            it->second.used = false;   // 复位，下一帧重新标记
+            ++it;
+        }
+    }
+}
+
 void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, float textAreaWidth,
                        float clientHeight, float originX,
                        DWORD caretRow, DWORD caretCol, bool caretVisible,
@@ -586,13 +646,18 @@ void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, float textA
     for (size_t i = 0; i < rows.size(); ++i)
     {
         const Row& row = rows[i];
-        IDWriteTextLayout* pLayout = CreateLayoutForRow(
-            row.text.c_str(), static_cast<UINT32>(row.text.size()), textAreaWidth);
+        IDWriteTextLayout* pLayout = (row.layoutKey != 0)
+            ? AcquireCachedLayout(row, textAreaWidth)
+            : CreateLayoutForRow(row.text.c_str(), static_cast<UINT32>(row.text.size()),
+                                 textAreaWidth);
         if (!pLayout)
             continue;
 
-        ApplyEmojiFontMapping(pLayout, row.text.c_str(),
-                              static_cast<UINT32>(row.text.size()));
+        if (row.layoutKey == 0)
+        {
+            ApplyEmojiFontMapping(pLayout, row.text.c_str(),
+                                  static_cast<UINT32>(row.text.size()));
+        }
 
         float y = row.yTop;
 
@@ -758,6 +823,9 @@ void CRenderer::Render(const std::vector<Row>& rows, int lineHeight, float textA
         DrawScrollbar(*vBar);
     if (hBar)
         DrawScrollbar(*hBar);
+
+    // 逐出本帧未用到的缓存 layout（滚动/编辑后只保留当前可见行）
+    PurgeStaleLayouts();
 
     HRESULT hrEnd = m_pRT->EndDraw();
     if (hrEnd == D2DERR_RECREATE_TARGET)

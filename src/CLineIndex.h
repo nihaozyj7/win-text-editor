@@ -47,6 +47,19 @@ public:
     // 给定字节偏移定位所在行号（用于光标 → 行）
     uint64_t ByteOffsetToRow(uint64_t offset) const;
 
+    // ---- 顺序行游标（热路径：高亮补算等需要逐行遍历的场景）----
+    // GetLineStart 每次都从关键帧回溯，逐行遍历是 O(n²)；
+    // 游标只定位一次，之后每行一次 memchr 推进，整体 O(n)
+    struct LineCursor
+    {
+        uint64_t start = 0;   // 当前行起始字节偏移
+    };
+    // 定位到 row 行（内部一次关键帧回溯）；row 超界时 start = 文档末尾
+    LineCursor CursorAt(uint64_t row) const;
+    // 输出当前行 [start, end)（end 为换行序列之前的行尾，或文档末尾），
+    // 并把游标推进到下一行；返回 false 表示已无更多行（start 已到文档末尾）
+    bool CursorNext(LineCursor& c, uint64_t* start, uint64_t* end) const;
+
 private:
     struct ScanState
     {

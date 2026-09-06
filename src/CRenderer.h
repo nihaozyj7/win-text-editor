@@ -5,6 +5,7 @@
 #include <dwrite_2.h>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include "Highlighter.h"
 
 // D2D/DWrite 渲染器：HwndRenderTarget 生命周期 + 可见行文本绘制
@@ -21,6 +22,7 @@ public:
         float        yTop;      // 本逻辑行首条视觉线的 y 坐标（含内边距/换行累计）
         UINT         visualLines;  // 自动换行后占用的视觉行数（≥1）
         std::vector<Token> tokens; // 语法着色 token（空 = 整行按正文色绘制）
+        uint64_t layoutKey = 0;    // TextLayout 缓存键（数据代+行号；0 = 不缓存）
     };
 
     struct Selection
@@ -112,6 +114,12 @@ private:
     IDWriteTextLayout* CreateLayoutForRow(const wchar_t* text, UINT32 len,
                                           float maxWidth) const;
 
+    // ---- TextLayout 按行缓存：滚动/光标闪烁帧复用布局对象，避免逐帧重建 ----
+    // 取本帧该行的 layout（返回引用计数 +1）；键/宽度不匹配则重建并替换
+    IDWriteTextLayout* AcquireCachedLayout(const Row& row, float maxWidth);
+    // 逐出本帧未用到的缓存项（缓存只保留当前可见行，内存有界）
+    void PurgeStaleLayouts();
+
     // 把 Emoji 代理对范围强制映射到 Segoe UI Emoji（保证彩色字形）
     void ApplyEmojiFontMapping(IDWriteTextLayout* pLayout, const wchar_t* text, UINT32 len) const;
 
@@ -148,4 +156,14 @@ private:
     bool  m_showLineNumbers;
     DWORD m_lineNumberTotal;
     float m_gutterWidth;
+
+    // TextLayout 缓存（只保留最近一帧用过的行）
+    struct LayoutCacheEntry
+    {
+        IDWriteTextLayout* pLayout = nullptr;
+        uint64_t key = 0;        // 行内容标识（数据代+行号）
+        float    maxWidth = 0.f; // 创建时的排版宽度（换行宽度变化即失效）
+        bool     used = false;   // 本帧是否命中
+    };
+    std::unordered_map<DWORD, LayoutCacheEntry> m_layoutCache;
 };

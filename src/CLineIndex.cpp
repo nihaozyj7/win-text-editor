@@ -314,6 +314,26 @@ uint64_t CLineIndex::GetLineLength(uint64_t row) const
     return end - start;
 }
 
+CLineIndex::LineCursor CLineIndex::CursorAt(uint64_t row) const
+{
+    LineCursor c;
+    c.start = GetLineStart(row);
+    return c;
+}
+
+bool CLineIndex::CursorNext(LineCursor& c, uint64_t* start, uint64_t* end) const
+{
+    if (c.start >= m_scan.size)
+        return false;
+    uint64_t brk = m_scan.FindBreak(c.start);
+    if (start)
+        *start = c.start;
+    if (end)
+        *end = brk;
+    c.start = (brk < m_scan.size) ? m_scan.SkipBreak(brk) : m_scan.size;
+    return true;
+}
+
 uint64_t CLineIndex::ByteOffsetToRow(uint64_t offset) const
 {
     if (m_lineCount == 0)
